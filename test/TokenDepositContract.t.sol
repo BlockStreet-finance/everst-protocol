@@ -73,6 +73,7 @@ contract TokenDepositContractTest is Test {
         // 准备提取
         uint256 withdrawAmount = 1 ether;
         uint256 nonce = depositContract.getUserNonce(user); // 使用当前用户nonce
+        uint256 timestamp = block.timestamp;
         
         // 创建签名
         bytes32 messageHash = keccak256(abi.encodePacked(
@@ -80,22 +81,18 @@ contract TokenDepositContractTest is Test {
             address(0), // MON token
             withdrawAmount,
             nonce,
+            timestamp,
             address(depositContract)
         ));
         
-        bytes32 ethSignedMessageHash = keccak256(abi.encodePacked(
-            "\x19Ethereum Signed Message:\n32",
-            messageHash
-        ));
-        
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPrivateKey, ethSignedMessageHash);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPrivateKey, messageHash);
         bytes memory signature = abi.encodePacked(r, s, v);
         
         // 执行提取
         vm.startPrank(user);
         uint256 userBalanceBefore = user.balance;
         
-        depositContract.withdrawWithSignature(address(0), withdrawAmount, nonce, signature);
+        depositContract.withdrawWithSignature(address(0), withdrawAmount, nonce, timestamp, signature);
         
         assertEq(depositContract.getUserBalance(user, address(0)), depositAmount - withdrawAmount);
         assertEq(user.balance, userBalanceBefore + withdrawAmount);
@@ -115,6 +112,7 @@ contract TokenDepositContractTest is Test {
         // 准备提取
         uint256 withdrawAmount = 100e18;
         uint256 nonce = depositContract.getUserNonce(user); // 使用当前用户nonce
+        uint256 timestamp = block.timestamp;
         
         // 创建签名
         bytes32 messageHash = keccak256(abi.encodePacked(
@@ -122,22 +120,18 @@ contract TokenDepositContractTest is Test {
             address(mockToken),
             withdrawAmount,
             nonce,
+            timestamp,
             address(depositContract)
         ));
         
-        bytes32 ethSignedMessageHash = keccak256(abi.encodePacked(
-            "\x19Ethereum Signed Message:\n32",
-            messageHash
-        ));
-        
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPrivateKey, ethSignedMessageHash);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPrivateKey, messageHash);
         bytes memory signature = abi.encodePacked(r, s, v);
         
         // 执行提取
         vm.startPrank(user);
         uint256 userTokenBalanceBefore = mockToken.balanceOf(user);
         
-        depositContract.withdrawWithSignature(address(mockToken), withdrawAmount, nonce, signature);
+        depositContract.withdrawWithSignature(address(mockToken), withdrawAmount, nonce, timestamp, signature);
         
         assertEq(depositContract.getUserBalance(user, address(mockToken)), depositAmount - withdrawAmount);
         assertEq(mockToken.balanceOf(user), userTokenBalanceBefore + withdrawAmount);
@@ -157,27 +151,24 @@ contract TokenDepositContractTest is Test {
         uint256 wrongPrivateKey = 0x999;
         uint256 withdrawAmount = 1 ether;
         uint256 nonce = depositContract.getUserNonce(user); // 使用当前用户nonce
+        uint256 timestamp = block.timestamp;
         
         bytes32 messageHash = keccak256(abi.encodePacked(
             user,
             address(0),
             withdrawAmount,
             nonce,
+            timestamp,
             address(depositContract)
         ));
         
-        bytes32 ethSignedMessageHash = keccak256(abi.encodePacked(
-            "\x19Ethereum Signed Message:\n32",
-            messageHash
-        ));
-        
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(wrongPrivateKey, ethSignedMessageHash);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(wrongPrivateKey, messageHash);
         bytes memory signature = abi.encodePacked(r, s, v);
         
         // 应该失败
         vm.startPrank(user);
         vm.expectRevert("Invalid signature");
-        depositContract.withdrawWithSignature(address(0), withdrawAmount, nonce, signature);
+        depositContract.withdrawWithSignature(address(0), withdrawAmount, nonce, timestamp, signature);
         vm.stopPrank();
     }
     
@@ -185,26 +176,25 @@ contract TokenDepositContractTest is Test {
         // 尝试提取超过余额的金额
         uint256 withdrawAmount = 1 ether;
         uint256 nonce = depositContract.getUserNonce(user); // 使用当前用户nonce
-        
+            
         bytes32 messageHash = keccak256(abi.encodePacked(
             user,
             address(0),
             withdrawAmount,
             nonce,
+            block.timestamp,
             address(depositContract)
         ));
         
-        bytes32 ethSignedMessageHash = keccak256(abi.encodePacked(
-            "\x19Ethereum Signed Message:\n32",
-            messageHash
-        ));
+
         
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPrivateKey, ethSignedMessageHash);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPrivateKey, messageHash);
         bytes memory signature = abi.encodePacked(r, s, v);
         
         vm.startPrank(user);
         vm.expectRevert("Insufficient balance");
-        depositContract.withdrawWithSignature(address(0), withdrawAmount, nonce, signature);
+        uint256 timestamp = block.timestamp;
+        depositContract.withdrawWithSignature(address(0), withdrawAmount, nonce, timestamp, signature);
         vm.stopPrank();
     }
     
@@ -217,31 +207,28 @@ contract TokenDepositContractTest is Test {
         
         uint256 withdrawAmount = 1 ether;
         uint256 nonce = depositContract.getUserNonce(user); // 获取当前nonce
+        uint256 timestamp = block.timestamp;
         
         bytes32 messageHash = keccak256(abi.encodePacked(
             user,
             address(0),
             withdrawAmount,
             nonce,
+            timestamp,
             address(depositContract)
         ));
         
-        bytes32 ethSignedMessageHash = keccak256(abi.encodePacked(
-            "\x19Ethereum Signed Message:\n32",
-            messageHash
-        ));
-        
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPrivateKey, ethSignedMessageHash);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPrivateKey, messageHash);
         bytes memory signature = abi.encodePacked(r, s, v);
         
         vm.startPrank(user);
         
         // 第一次提取应该成功
-        depositContract.withdrawWithSignature(address(0), withdrawAmount, nonce, signature);
+        depositContract.withdrawWithSignature(address(0), withdrawAmount, nonce, timestamp, signature);
         
         // 第二次使用相同nonce应该失败（因为nonce已经递增）
         vm.expectRevert("Invalid nonce");
-        depositContract.withdrawWithSignature(address(0), withdrawAmount, nonce, signature);
+        depositContract.withdrawWithSignature(address(0), withdrawAmount, nonce, timestamp, signature);
         
         vm.stopPrank();
     }
@@ -255,27 +242,24 @@ contract TokenDepositContractTest is Test {
         
         uint256 withdrawAmount = 1 ether;
         uint256 wrongNonce = depositContract.getUserNonce(user) + 1; // 使用错误的nonce
+        uint256 timestamp = block.timestamp;
         
         bytes32 messageHash = keccak256(abi.encodePacked(
             user,
             address(0),
             withdrawAmount,
             wrongNonce,
+            timestamp,
             address(depositContract)
         ));
         
-        bytes32 ethSignedMessageHash = keccak256(abi.encodePacked(
-            "\x19Ethereum Signed Message:\n32",
-            messageHash
-        ));
-        
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPrivateKey, ethSignedMessageHash);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPrivateKey, messageHash);
         bytes memory signature = abi.encodePacked(r, s, v);
         
         // 应该失败
         vm.startPrank(user);
         vm.expectRevert("Invalid nonce");
-        depositContract.withdrawWithSignature(address(0), withdrawAmount, wrongNonce, signature);
+        depositContract.withdrawWithSignature(address(0), withdrawAmount, wrongNonce, timestamp, signature);
         vm.stopPrank();
     }
     
@@ -362,6 +346,108 @@ contract TokenDepositContractTest is Test {
         
         vm.expectRevert("Only admin can call this function");
         depositContract.emergencyWithdraw(address(0), 1 ether);
+        
+        vm.stopPrank();
+    }
+    
+    function testWithdrawFailsWithExpiredTimestamp() public {
+        // 首先存入一些MON
+        vm.startPrank(user);
+        uint256 depositAmount = 2 ether;
+        depositContract.depositMON{value: depositAmount}();
+        vm.stopPrank();
+        
+        uint256 withdrawAmount = 1 ether;
+        uint256 nonce = depositContract.getUserNonce(user);
+        uint256 timestamp = block.timestamp;
+        
+        // 创建签名
+        bytes32 messageHash = keccak256(abi.encodePacked(
+            user,
+            address(0),
+            withdrawAmount,
+            nonce,
+            timestamp,
+            address(depositContract)
+        ));
+        
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPrivateKey, messageHash);
+        bytes memory signature = abi.encodePacked(r, s, v);
+        
+        // 时间前进超过3分钟（180秒），应该失败
+        vm.warp(block.timestamp + 200);
+        
+        vm.startPrank(user);
+        vm.expectRevert("Timestamp expired");
+        depositContract.withdrawWithSignature(address(0), withdrawAmount, nonce, timestamp, signature);
+        vm.stopPrank();
+    }
+    
+    function testWithdrawFailsWithFutureTimestamp() public {
+        // 首先存入一些MON
+        vm.startPrank(user);
+        uint256 depositAmount = 2 ether;
+        depositContract.depositMON{value: depositAmount}();
+        vm.stopPrank();
+        
+        uint256 withdrawAmount = 1 ether;
+        uint256 nonce = depositContract.getUserNonce(user);
+        uint256 timestamp = block.timestamp + 100; // 未来时间戳
+        
+        // 创建签名
+        bytes32 messageHash = keccak256(abi.encodePacked(
+            user,
+            address(0),
+            withdrawAmount,
+            nonce,
+            timestamp,
+            address(depositContract)
+        ));
+        
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPrivateKey, messageHash);
+        bytes memory signature = abi.encodePacked(r, s, v);
+        
+        vm.startPrank(user);
+        vm.expectRevert("Timestamp expired");
+        depositContract.withdrawWithSignature(address(0), withdrawAmount, nonce, timestamp, signature);
+        vm.stopPrank();
+    }
+    
+    function testWithdrawWithValidTimestamp() public {
+        // 首先存入一些MON
+        vm.startPrank(user);
+        uint256 depositAmount = 2 ether;
+        depositContract.depositMON{value: depositAmount}();
+        vm.stopPrank();
+        
+        uint256 withdrawAmount = 1 ether;
+        uint256 nonce = depositContract.getUserNonce(user);
+        uint256 timestamp = block.timestamp;
+        
+        // 创建签名
+        bytes32 messageHash = keccak256(abi.encodePacked(
+            user,
+            address(0),
+            withdrawAmount,
+            nonce,
+            timestamp,
+            address(depositContract)
+        ));
+        
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPrivateKey, messageHash);
+        bytes memory signature = abi.encodePacked(r, s, v);
+        
+        // 时间前进2分钟，仍在有效期内
+        vm.warp(block.timestamp + 120);
+        
+        vm.startPrank(user);
+        uint256 userBalanceBefore = user.balance;
+        
+        depositContract.withdrawWithSignature(address(0), withdrawAmount, nonce, timestamp, signature);
+        
+        assertEq(depositContract.getUserBalance(user, address(0)), depositAmount - withdrawAmount);
+        assertEq(user.balance, userBalanceBefore + withdrawAmount);
+        assertEq(depositContract.getUserNonce(user), nonce + 1);
         
         vm.stopPrank();
     }

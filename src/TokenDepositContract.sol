@@ -92,16 +92,21 @@ contract TokenDepositContract {
      * @param token 代币地址（MON用address(0)）
      * @param amount 提取数量
      * @param nonce 防重放随机数
+     * @param timestamp 时间戳
      * @param signature 后端签名
      */
     function withdrawWithSignature(
         address token,
         uint256 amount,
         uint256 nonce,
+        uint256 timestamp,
         bytes memory signature
     ) external {
         require(amount > 0, "Withdraw amount must be greater than 0");
         require(userBalances[msg.sender][token] >= amount, "Insufficient balance");
+        
+        // 检查时间戳是否在有效期内（例如：5分钟内）
+        require(block.timestamp >= timestamp && block.timestamp <= timestamp + 180, "Timestamp expired");
         
         // 创建签名哈希
         bytes32 messageHash = keccak256(abi.encodePacked(
@@ -109,19 +114,15 @@ contract TokenDepositContract {
             token,
             amount,
             nonce,
+            timestamp,
             address(this)
-        ));
-        
-        bytes32 ethSignedMessageHash = keccak256(abi.encodePacked(
-            "\x19Ethereum Signed Message:\n32",
-            messageHash
         ));
         
         // 检查nonce是否有效（必须是用户当前nonce）
         require(nonce == userNonces[msg.sender]+1, "Invalid nonce");
         
         // 验证签名
-        require(verifySignature(ethSignedMessageHash, signature), "Invalid signature");
+        require(verifySignature(messageHash, signature), "Invalid signature");
         
         // 递增用户nonce
         userNonces[msg.sender]++;
