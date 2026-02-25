@@ -104,10 +104,23 @@
       },
       "collateralFactor": "700000000000000000",
       "reserveFactor": "200000000000000000",
-      "borrowCap": "100000000000000000000000", 
+      "borrowCap": "100000000000000000000000",
       "initialExchangeRate": "200000000000000000000000000",
       "initialPrice": "250000000000000000000",
       "comment": "Collateral: 70%, Reserve: 20%, BorrowCap: 100K TSLA, Price: $250"
+    },
+    "wtCOIN": {
+      "name": "BlockStreet wtCOIN",
+      "symbol": "bwtCOIN",
+      "decimals": 8,
+      "underlying": {
+        "base_mainnet": "0x5cDa0E1CA4ce2af96315f7F8963C85399c172204"
+      },
+      "collateralFactor": "700000000000000000",
+      "reserveFactor": "200000000000000000",
+      "borrowCap": "100000000000000000000000",
+      "initialExchangeRate": "200000000000000000000000000",
+      "comment": "Collateral: 70%, Reserve: 20%, BorrowCap: 100K wtCOIN"
     }
   }
 }
