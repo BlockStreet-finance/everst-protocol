@@ -7,10 +7,22 @@
       "blockExplorer": "https://testnet.bscscan.com"
     },
     "bsc_mainnet": {
-      "name": "BSC Mainnet", 
+      "name": "BSC Mainnet",
       "chainId": 56,
       "rpcUrl": "https://bsc-dataseed.binance.org/",
       "blockExplorer": "https://bscscan.com"
+    },
+    "base_mainnet": {
+      "name": "Base Mainnet",
+      "chainId": 8453,
+      "rpcUrl": "https://mainnet.base.org",
+      "blockExplorer": "https://basescan.org"
+    },
+    "base_sepolia": {
+      "name": "Base Sepolia",
+      "chainId": 84532,
+      "rpcUrl": "https://sepolia.base.org",
+      "blockExplorer": "https://sepolia.basescan.org"
     }
   },
   "deployedContracts": {
@@ -53,6 +65,18 @@
     "jumpMultiplierPerYear": "2000000000000000000",
     "kink": "800000000000000000",
     "comment": "Base: 2% APY, Multiplier: 20% APY, Jump: 200% APY, Kink: 80%"
+  },
+  "externalContracts": {
+    "base_mainnet": {
+      "pyth": "0x8250f4aF4B972684F7b336503E2D6dFeDeB1487a",
+      "wtCOIN": "0x5cDa0E1CA4ce2af96315f7F8963C85399c172204",
+      "pythPriceIds": {
+        "COIN_USD": "0xfee33f2a978bf32dd6b662b65ba8083c6773b494f8401194ec1870c640860245"
+      }
+    },
+    "base_sepolia": {
+      "pyth": "0xA2aa501b19aff244D90cc15a4Cf739D2725B5729"
+    }
   },
   "markets": {
     "USDC": {
