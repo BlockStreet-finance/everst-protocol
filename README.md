@@ -139,3 +139,5 @@ Test Tokens:
   Mock USDC: 0x64544969ed7EBf5f083679233325356EbE738930
   Mock TSLA: 0x57F61DA3b7FC9df62857b979aA76A16417BeF396
 ```
+
+📋 BlockStreet Protocol Addresses (Base)
