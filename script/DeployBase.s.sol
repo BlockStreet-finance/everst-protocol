@@ -72,8 +72,8 @@ contract DeployBaseScript is Script {
         _deployOracle();
         _initializeProtocol();
         _deployMarkets();
-        _setupMarkets();
         _configureOracle();
+        _setupMarkets();
         _transferOwnership();
 
         vm.stopBroadcast();
@@ -277,7 +277,7 @@ contract DeployBaseScript is Script {
             underlying: config.wtCOINMarket.underlying,  // wtCOIN
             baseUnit: 1e18,                               // 18 decimals
             pythPriceId: config.coinUsdPriceId,           // COIN/USD
-            maxPriceAge: 3600,                            // 1 hour
+            maxPriceAge: 259200,                          // 72 hours (covers weekends, keeper controls actual freshness)
             maxConfidenceRatio: 200                       // 2%
         });
 

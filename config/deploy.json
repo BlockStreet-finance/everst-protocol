@@ -54,10 +54,10 @@
     "comment": "closeFactor: 50% (0.5 * 1e18), liquidationIncentive: 108% (1.08 * 1e18)"
   },
   "governance": {
-    "admin": "0x0000000000000000000000000000000000000000",
-    "pauseGuardian": "0x0000000000000000000000000000000000000000",
-    "borrowCapGuardian": "0x0000000000000000000000000000000000000000",
-    "comment": "Replace these addresses with your Safe multisig wallet addresses before deployment"
+    "admin": "0x62bdd47787ff9ac1eb0f62ba800db821ed0323e1",
+    "pauseGuardian": "0x62bdd47787ff9ac1eb0f62ba800db821ed0323e1",
+    "borrowCapGuardian": "0x62bdd47787ff9ac1eb0f62ba800db821ed0323e1",
+    "comment": "Initial admin EOA, migrate to multisig later"
   },
   "interestRateModel": {
     "baseRatePerYear": "20000000000000000",
@@ -75,7 +75,10 @@
       }
     },
     "base_sepolia": {
-      "pyth": "0xA2aa501b19aff244D90cc15a4Cf739D2725B5729"
+      "pyth": "0xA2aa501b19aff244D90cc15a4Cf739D2725B5729",
+      "pythPriceIds": {
+        "COIN_USD": "0xfee33f2a978bf32dd6b662b65ba8083c6773b494f8401194ec1870c640860245"
+      }
     }
   },
   "markets": {
@@ -114,13 +117,14 @@
       "symbol": "bwtCOIN",
       "decimals": 8,
       "underlying": {
-        "base_mainnet": "0x5cDa0E1CA4ce2af96315f7F8963C85399c172204"
+        "base_mainnet": "0x5cDa0E1CA4ce2af96315f7F8963C85399c172204",
+        "base_sepolia": "0x0000000000000000000000000000000000000000"
       },
-      "collateralFactor": "700000000000000000",
+      "collateralFactor": "500000000000000000",
       "reserveFactor": "200000000000000000",
       "borrowCap": "100000000000000000000000",
       "initialExchangeRate": "200000000000000000000000000",
-      "comment": "Collateral: 70%, Reserve: 20%, BorrowCap: 100K wtCOIN"
+      "comment": "Collateral: 50%, Reserve: 20%, BorrowCap: 100K wtCOIN"
     }
   }
 }

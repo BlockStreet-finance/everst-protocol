@@ -4,19 +4,7 @@ import { loadConfig } from "./config.js";
 import { updatePriceFeeds, PYTH_ABI } from "./updater.js";
 import { checkFreshness } from "./monitor.js";
 import { AlertLevel, sendAlert } from "./alerter.js";
-
-/**
- * Check if US stock market is currently open.
- * Regular hours: Mon-Fri, 9:30 AM – 4:00 PM Eastern Time.
- */
-function isUSMarketOpen(): boolean {
-  const now = new Date();
-  const et = new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
-  const day = et.getDay(); // 0=Sun, 6=Sat
-  if (day === 0 || day === 6) return false;
-  const mins = et.getHours() * 60 + et.getMinutes();
-  return mins >= 9 * 60 + 30 && mins < 16 * 60;
-}
+import { getMarketStatus, MarketState } from "./market-hours.js";
 
 async function main() {
   const config = loadConfig();
@@ -43,17 +31,30 @@ async function main() {
   // Main loop
   async function tick() {
     try {
-      if (config.marketHoursOnly && !isUSMarketOpen()) {
-        const et = new Date().toLocaleString("en-US", { timeZone: "America/New_York" });
-        console.log(`  [Market closed] ${et} ET — skipping`);
+      const status = getMarketStatus();
+      const et = new Date().toLocaleString("en-US", { timeZone: "America/New_York" });
+
+      console.log(`\n[${et} ET] Market: ${status.state} | staleness threshold: ${Math.round(status.maxStaleSec / 3600)}h | update: ${status.shouldUpdate}`);
+
+      if (config.marketHoursOnly && !status.shouldUpdate) {
+        console.log(`  [Skip] Market ${status.state}, not pushing updates`);
+        // Still check freshness with dynamic threshold
+        await checkFreshness(pythContract, config.feeds, status.maxStaleSec);
         return;
       }
 
-      // 1. Push latest Pyth VAAs to on-chain Pyth contract
-      await updatePriceFeeds(hermesClient, pythContract, config.feeds, config.priceDeviationBps, config.maxStalenessBeforeForceUpdateSec, config.dryRun);
+      // Push latest Pyth VAAs to on-chain
+      await updatePriceFeeds(
+        hermesClient,
+        pythContract,
+        config.feeds,
+        config.priceDeviationBps,
+        config.maxStalenessBeforeForceUpdateSec,
+        config.dryRun,
+      );
 
-      // 2. Check price freshness
-      await checkFreshness(pythContract, config.feeds, config.maxPriceAgeSec);
+      // Check price freshness with market-state-aware threshold
+      await checkFreshness(pythContract, config.feeds, status.maxStaleSec);
     } catch (err) {
       sendAlert({
         level: AlertLevel.ERROR,
