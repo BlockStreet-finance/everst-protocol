@@ -94,4 +94,11 @@ contract BlotrollerStorage is UnitrollerAdminStorage {
 
     // @notice Borrow caps enforced by borrowAllowed for each bToken address. Defaults to zero which corresponds to unlimited borrowing.
     mapping(address => uint) public borrowCaps;
+
+    /// @notice External access controller gating mint (deposit) and borrow.
+    /// @dev When set to address(0) the gate is DISABLED — anyone may mint/borrow.
+    ///      When set to a non-zero address, Blotroller calls
+    ///      IAccessController(accessController).isAllowedToMint/Borrow on every
+    ///      mint/borrow and reverts if it returns false.
+    address public accessController;
 }
