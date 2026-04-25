@@ -61,7 +61,7 @@
   },
   "interestRateModel": {
     "baseRatePerYear": "20000000000000000",
-    "multiplierPerYear": "200000000000000000", 
+    "multiplierPerYear": "200000000000000000",
     "jumpMultiplierPerYear": "2000000000000000000",
     "kink": "800000000000000000",
     "comment": "Base: 2% APY, Multiplier: 20% APY, Jump: 200% APY, Kink: 80%"
@@ -91,11 +91,11 @@
         "mainnet": "0x0000000000000000000000000000000000000000"
       },
       "collateralFactor": "800000000000000000",
-      "reserveFactor": "100000000000000000", 
+      "reserveFactor": "100000000000000000",
       "borrowCap": "10000000000000000000000000",
       "initialExchangeRate": "200000000000000000000000000",
       "initialPrice": "1000000000000000000",
-      "comment": "Collateral: 80%, Reserve: 10%, BorrowCap: 10M USDC, Price: $1"
+      "comment": "Collateral: 80%, Reserve: 10%, BorrowCap: 10M USDC, Price: $1. initialExchangeRate=2e26 assumes 18-decimal underlying (mock USDC). For real 6-decimal USDC, use 2e14."
     },
     "TSLA": {
       "name": "BlockStreet Tesla Stock Token",

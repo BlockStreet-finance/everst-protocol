@@ -52,9 +52,17 @@ contract TestSupplyBorrowScript is Script {
         console.log("  wtCOIN balance:", wtcoin.balanceOf(msg.sender));
         _logLiquidity("after borrow");
 
-        // Step 5: Repay
-        console.log("repay 10 wtCOIN...");
-        console.log("  repay result:", bwtcoin.repayBorrow(10 ether));
+        // Step 5: Repay FULL outstanding debt (principal + accrued interest)
+        //   Pass type(uint256).max so BToken auto-fills current borrowBalance.
+        //   approve() already set to max, wallet balance >> debt.
+        uint256 debtBefore = bwtcoin.borrowBalanceCurrent(msg.sender);
+        console.log("debt (with interest) before repay:", debtBefore);
+        console.log("wallet wtCOIN before repay:       ", wtcoin.balanceOf(msg.sender));
+        console.log("allowance bwtCOIN:                ", wtcoin.allowance(msg.sender, address(bwtcoin)));
+
+        console.log("repay ALL (type(uint256).max)...");
+        console.log("  repay result:", bwtcoin.repayBorrow(type(uint256).max));
+        console.log("  debt after repay:", bwtcoin.borrowBalanceCurrent(msg.sender));
 
         // Step 6: Redeem all
         console.log("redeem all bwtCOIN...");
