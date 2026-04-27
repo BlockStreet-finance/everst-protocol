@@ -97,7 +97,7 @@ contract BlotrollerStorage is UnitrollerAdminStorage {
 
     /// @notice Token classification system for A/B borrowing rules
     /// @dev 0 = Type A, 1 = Type B.
-    enum TokenType { 
+    enum TokenType {
         TYPE_A,        // 0: When deposited, can only borrow Type B tokens
         TYPE_B         // 1: When deposited, can only borrow Type A tokens
     }
@@ -114,4 +114,11 @@ contract BlotrollerStorage is UnitrollerAdminStorage {
 
     /// @notice Event emitted when separation mode is toggled
     event SeparationModeToggled(bool oldMode, bool newMode);
+
+    /// @notice External access controller gating mint (deposit) and borrow.
+    /// @dev When set to address(0) the gate is DISABLED — anyone may mint/borrow.
+    ///      When set to a non-zero address, Blotroller calls
+    ///      IAccessController(accessController).isAllowedToMint/Borrow on every
+    ///      mint/borrow and reverts if it returns false.
+    address public accessController;
 }
