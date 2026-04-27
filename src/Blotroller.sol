@@ -7,6 +7,7 @@ import "./PriceOracle.sol";
 import "./BlotrollerInterface.sol";
 import "./BlotrollerStorage.sol";
 import "./Unitroller.sol";
+import "./AccessController.sol";
 
 /**
  * @title BlockStreet's Blotroller Contract
@@ -49,6 +50,9 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
 
     /// @notice Emitted when borrow cap guardian is changed
     event NewBorrowCapGuardian(address oldBorrowCapGuardian, address newBorrowCapGuardian);
+
+    /// @notice Emitted when the access controller is changed
+    event NewAccessController(address oldAccessController, address newAccessController);
 
     // closeFactorMantissa must be strictly greater than this value
     uint internal constant closeFactorMinMantissa = 0.05e18; // 0.05
@@ -209,14 +213,17 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
         require(!mintGuardianPaused[bToken], "mint is paused");
 
         // Shh - currently unused
-        minter;
         mintAmount;
 
         if (!markets[bToken].isListed) {
             return uint(Error.MARKET_NOT_LISTED);
         }
 
-
+        // Access gate: address(0) means the gate is disabled and anyone may mint.
+        address _accessController = accessController;
+        if (_accessController != address(0) && !IAccessController(_accessController).isAllowedToMint(minter)) {
+            return uint(Error.REJECTION);
+        }
 
         return uint(Error.NO_ERROR);
     }
@@ -339,6 +346,12 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
 
         if (!markets[bToken].isListed) {
             return uint(Error.MARKET_NOT_LISTED);
+        }
+
+        // Access gate: address(0) means the gate is disabled and anyone may borrow.
+        address _accessController = accessController;
+        if (_accessController != address(0) && !IAccessController(_accessController).isAllowedToBorrow(borrower)) {
+            return uint(Error.REJECTION);
         }
 
         if (!markets[bToken].accountMembership[borrower]) {
@@ -1239,6 +1252,28 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
         seizeGuardianPaused = state;
         emit ActionPaused("Seize", state);
         return state;
+    }
+
+    /**
+     * @notice Sets the external access controller used to gate mint (deposit) and borrow.
+     * @dev Admin-only.
+     *      - Pass address(0) to DISABLE the gate entirely — any address can mint/borrow.
+     *        This is the initial/default state, preserving legacy behavior.
+     *      - Pass a non-zero address to ENABLE the gate. On every mint/borrow the
+     *        Blotroller will call isAllowedToMint / isAllowedToBorrow on the controller
+     *        and revert if it returns false.
+     *      The controller is expected to implement IAccessController.
+     */
+    function _setAccessController(address newAccessController) external returns (uint) {
+        if (msg.sender != admin) {
+            return fail(Error.UNAUTHORIZED, FailureInfo.SET_ACCESS_CONTROLLER_OWNER_CHECK);
+        }
+
+        address old = accessController;
+        accessController = newAccessController;
+        emit NewAccessController(old, newAccessController);
+
+        return uint(Error.NO_ERROR);
     }
 
     function _become(Unitroller unitroller) public {
