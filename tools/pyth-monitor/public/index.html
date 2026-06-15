@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pyth Feed Monitor — BlockStreet</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --border: #283039; --fg: #e6edf3;
+    --muted: #8b949e; --green: #3fb950; --amber: #d29922; --red: #f85149; --blue: #58a6ff;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 14px/1.5 system-ui, -apple-system, sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+           padding: 14px 20px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  .status { color: var(--muted); font-size: 12px; font-family: var(--mono); }
+  .status b { color: var(--fg); font-weight: 600; }
+  .spacer { flex: 1; }
+  button { background: #21262d; color: var(--fg); border: 1px solid var(--border);
+           border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px; }
+  button:hover { border-color: var(--blue); }
+  main { padding: 20px; max-width: 1280px; margin: 0 auto; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+           gap: 12px; margin-bottom: 22px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+  .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .card .val { font-size: 22px; font-family: var(--mono); margin-top: 4px; }
+  .card .sub { color: var(--muted); font-size: 12px; font-family: var(--mono); }
+  table { width: 100%; border-collapse: collapse; background: var(--panel);
+          border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  th, td { text-align: right; padding: 9px 12px; border-bottom: 1px solid var(--border); font-family: var(--mono); font-size: 13px; }
+  th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .03em; background: #12171e; }
+  td.l, th.l { text-align: left; }
+  tr:last-child td { border-bottom: none; }
+  tr.stale td.price { color: var(--muted); }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+  .pill.fresh { background: rgba(63,185,80,.15); color: var(--green); }
+  .pill.stale { background: rgba(139,148,158,.15); color: var(--muted); }
+  .pill.miss  { background: rgba(248,81,73,.15); color: var(--red); }
+  .pill.active { background: rgba(88,166,255,.15); color: var(--blue); }
+  .warn { color: var(--amber); } .bad { color: var(--red); } .ok { color: var(--green); }
+  .sym { color: var(--fg); } .muted { color: var(--muted); }
+  h2 { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin: 26px 0 10px; }
+  .hint { color: var(--muted); font-weight: 400; text-transform: none; letter-spacing: 0; font-size: 12px; }
+  .caretcol { width: 22px; }
+  .stockrow { cursor: pointer; }
+  .stockrow:hover td { background: #1b212a; }
+  .caret { display: inline-block; color: var(--muted); transition: transform .12s; }
+  .caret.open { transform: rotate(90deg); }
+  .detailrow > td { padding: 0; background: #0b0e13; border-bottom: 1px solid var(--border); }
+  .detail-inner { padding: 4px 10px 12px 30px; }
+  .detail-inner table { border: 1px solid var(--border); }
+  .detail-inner th, .detail-inner td { padding: 6px 10px; font-size: 12px; }
+  .chartwrap { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+  .chartwrap select { background: #21262d; color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; }
+  canvas { width: 100%; height: 220px; display: block; margin-top: 10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Pyth Feed Monitor</h1>
+  <span class="status" id="status">connecting…</span>
+  <span class="spacer"></span>
+  <label class="status"><input type="checkbox" id="auto" checked /> auto-refresh</label>
+  <button id="refresh">Refresh now</button>
+</header>
+
+<main>
+  <h2>Stocks <span class="hint">— click a row to expand its feeds</span></h2>
+  <table id="stocks">
+    <thead>
+      <tr>
+        <th class="l caretcol"></th>
+        <th class="l">Stock</th><th class="l">Active session</th><th>Active price</th>
+        <th>xStock (24/7)</th><th>Basis (bps)</th><th>RR</th><th>Priceable?</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <h2>History</h2>
+  <div class="chartwrap">
+    <label class="status">stock
+      <select id="stocksel"></select>
+    </label>
+    <label class="status">feed
+      <select id="feedsel"></select>
+    </label>
+    <span class="status" id="histinfo"></span>
+    <canvas id="chart"></canvas>
+  </div>
+</main>
+
+<script>
+const fmtNum = (n, d = 4) => n == null ? "—" : Number(n).toLocaleString(undefined, { maximumFractionDigits: d, minimumFractionDigits: 0 });
+const fmtAge = (s) => {
+  if (s == null) return "—";
+  if (s < 90) return s + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m " + (s % 60) + "s";
+  if (s < 86400) return Math.floor(s / 3600) + "h " + Math.floor((s % 3600) / 60) + "m";
+  return Math.floor(s / 86400) + "d " + Math.floor((s % 86400) / 3600) + "h";
+};
+const fmtTime = (unixSec) => unixSec == null ? "—" : new Date(unixSec * 1000).toISOString().replace("T", " ").slice(0, 19);
+
+let meta = null;
+
+async function fetchMeta() {
+  meta = await (await fetch("/api/meta")).json();
+}
+
+// Two-level feed picker: pick a stock, then a feed within that stock.
+// Built once at init; selections are preserved across auto-refresh.
+function populateStockSelect() {
+  const sel = document.getElementById("stocksel");
+  if (sel.options.length) return;
+  for (const g of [...new Set(meta.feeds.map((f) => f.group))]) {
+    const o = document.createElement("option");
+    o.value = g; o.textContent = g;
+    sel.appendChild(o);
+  }
+}
+
+function populateFeedSelect() {
+  const group = document.getElementById("stocksel").value;
+  const sel = document.getElementById("feedsel");
+  const prev = sel.value;
+  sel.innerHTML = "";
+  for (const f of meta.feeds.filter((f) => f.group === group)) {
+    const o = document.createElement("option");
+    o.value = f.id.replace(/^0x/, "").toLowerCase();
+    o.textContent = f.session; // short — the stock is already chosen
+    sel.appendChild(o);
+  }
+  if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
+}
+
+async function tick() {
+  let data;
+  try {
+    data = await (await fetch("/api/latest")).json();
+  } catch (e) {
+    document.getElementById("status").innerHTML = '<span class="bad">fetch failed: ' + e + "</span>";
+    return;
+  }
+  renderStatus(data);
+  renderStocks(data.derived, data.feeds);
+  renderChart();
+}
+
+function renderStatus(data) {
+  const lp = meta?.lastPoll;
+  const when = lp?.at ? new Date(lp.at).toLocaleTimeString() : "—";
+  const health = lp?.ok ? '<span class="ok">ok</span>' : '<span class="bad">' + (lp?.error || "no poll") + "</span>";
+  document.getElementById("status").innerHTML =
+    `last poll <b>${when}</b> ${health} · every ${meta?.pollIntervalSec}s · rows <b>${meta?.rows ?? "—"}</b> · fresh≤${meta?.freshnessSec}s`;
+}
+
+// Which stock rows are expanded — preserved across auto-refresh.
+const expanded = new Set();
+
+function summaryCells(d) {
+  const basisClass = d.basisBps == null ? "" : Math.abs(d.basisBps) > 100 ? "bad" : Math.abs(d.basisBps) > 30 ? "warn" : "ok";
+  const session = d.activeSession
+    ? `<span class="pill active">${d.activeSession}</span>`
+    : '<span class="pill stale">closed</span>';
+  const activePrice = d.activePrice != null ? "$" + fmtNum(d.activePrice, 2) : '<span class="muted">—</span>';
+  let proxy, basis, rr;
+  if (!d.hasProxy) {
+    proxy = '<span class="muted">no xStock</span>'; basis = '<span class="muted">—</span>'; rr = '<span class="muted">—</span>';
+  } else {
+    proxy = d.proxyPrice != null
+      ? `$${fmtNum(d.proxyPrice, 2)} ${d.proxyFresh ? '<span class="ok">●</span>' : '<span class="warn">○</span>'}`
+      : '<span class="muted">—</span>';
+    basis = d.basisBps == null ? '<span class="muted">—</span>'
+      : `<span class="${basisClass}">${d.basisBps >= 0 ? "+" : ""}${fmtNum(d.basisBps, 1)}</span>`;
+    rr = d.rr != null ? fmtNum(d.rr, 5) : '<span class="muted">—</span>';
+  }
+  const priceable = d.priceable ? '<span class="ok">yes</span>' : '<span class="bad">NO</span>';
+  return `<td class="l">${session}</td><td>${activePrice}</td><td>${proxy}</td>
+          <td>${basis}</td><td>${rr}</td><td>${priceable}</td>`;
+}
+
+function detailTable(feeds) {
+  const rows = feeds.map((f) => {
+    const r = f.reading;
+    let state, cls = "";
+    if (!r || !r.ok) state = '<span class="pill miss">missing</span>';
+    else if (r.fresh) state = '<span class="pill fresh">fresh</span>';
+    else { state = '<span class="pill stale">stale</span>'; cls = "stale"; }
+    const price = r && r.ok ? (f.session === "rr" ? fmtNum(r.price, 6) : "$" + fmtNum(r.price, 2)) : "—";
+    return `<tr class="${cls}">
+      <td class="l">${f.symbol}</td>
+      <td class="l muted">${f.session}</td>
+      <td class="price">${price}</td>
+      <td>${r && r.ok ? fmtNum(r.conf, 4) : "—"}</td>
+      <td>${r && r.ok && r.conf_bps != null ? fmtNum(r.conf_bps, 1) : "—"}</td>
+      <td class="muted">${r && r.ok ? r.expo : "—"}</td>
+      <td class="muted">${r ? fmtTime(r.publish_time) : "—"}</td>
+      <td>${r ? fmtAge(r.ageNow) : "—"}</td>
+      <td>${state}</td>
+    </tr>`;
+  }).join("");
+  return `<table>
+    <thead><tr>
+      <th class="l">Symbol</th><th class="l">Session</th><th>Price</th><th>Conf</th>
+      <th>Conf (bps)</th><th>Expo</th><th>Publish (UTC)</th><th>Age</th><th>State</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+function renderStocks(derived, feeds) {
+  const tb = document.querySelector("#stocks tbody");
+  const feedsByGroup = {};
+  for (const f of feeds) (feedsByGroup[f.group] ||= []).push(f);
+
+  tb.innerHTML = derived.map((d) => {
+    const open = expanded.has(d.group);
+    const caret = `<span class="caret ${open ? "open" : ""}">▶</span>`;
+    const summary = `<tr class="stockrow" data-group="${d.group}">
+      <td class="l">${caret}</td><td class="l sym">${d.group}</td>${summaryCells(d)}
+    </tr>`;
+    const detail = `<tr class="detailrow" data-group="${d.group}" style="display:${open ? "" : "none"}">
+      <td colspan="8"><div class="detail-inner">${detailTable(feedsByGroup[d.group] || [])}</div></td>
+    </tr>`;
+    return summary + detail;
+  }).join("");
+
+  tb.querySelectorAll(".stockrow").forEach((tr) => {
+    tr.onclick = () => {
+      const g = tr.dataset.group;
+      const isOpen = expanded.has(g);
+      isOpen ? expanded.delete(g) : expanded.add(g);
+      tb.querySelector(`.detailrow[data-group="${g}"]`).style.display = isOpen ? "none" : "";
+      tr.querySelector(".caret").classList.toggle("open", !isOpen);
+    };
+  });
+}
+
+let chartCache = { id: null, rows: [] };
+async function renderChart() {
+  const id = document.getElementById("feedsel").value;
+  if (!id) return;
+  const data = await (await fetch("/api/history?id=" + id + "&limit=1000")).json();
+  chartCache = { id, rows: data.rows || [] };
+  drawChart();
+}
+
+function drawChart() {
+  const cv = document.getElementById("chart");
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = 220;
+  cv.width = W * dpr; cv.height = H * dpr;
+  const ctx = cv.getContext("2d");
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, W, H);
+  const rows = chartCache.rows.filter((r) => r.ok && r.price != null);
+  const info = document.getElementById("histinfo");
+  if (rows.length < 2) { info.textContent = "  (need ≥2 samples — let it run a bit)"; return; }
+  const xs = rows.map((r) => r.ts), ys = rows.map((r) => r.price);
+  const xmin = xs[0], xmax = xs[xs.length - 1];
+  let ymin = Math.min(...ys), ymax = Math.max(...ys);
+  if (ymin === ymax) { ymin -= 1; ymax += 1; }
+  const pad = 36;
+  const X = (t) => pad + ((t - xmin) / (xmax - xmin || 1)) * (W - pad - 8);
+  const Y = (v) => H - 22 - ((v - ymin) / (ymax - ymin || 1)) * (H - 22 - 8);
+  // axes labels
+  ctx.fillStyle = "#8b949e"; ctx.font = "11px ui-monospace, monospace";
+  ctx.fillText("$" + ymax.toFixed(2), 2, Y(ymax) + 4);
+  ctx.fillText("$" + ymin.toFixed(2), 2, Y(ymin) + 4);
+  ctx.fillText(new Date(xmin).toLocaleTimeString(), pad, H - 6);
+  ctx.fillText(new Date(xmax).toLocaleTimeString(), W - 70, H - 6);
+  // line
+  ctx.strokeStyle = "#58a6ff"; ctx.lineWidth = 1.5; ctx.beginPath();
+  rows.forEach((r, i) => { const x = X(r.ts), y = Y(r.price); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+  ctx.stroke();
+  info.textContent = `  ${rows.length} samples · last $${ys[ys.length - 1].toFixed(2)}`;
+}
+
+document.getElementById("refresh").onclick = () => { fetchMeta().then(tick); };
+document.getElementById("stocksel").onchange = () => { populateFeedSelect(); renderChart(); };
+document.getElementById("feedsel").onchange = renderChart;
+window.addEventListener("resize", drawChart);
+
+let timer = null;
+const startTimer = () => { timer = setInterval(() => fetchMeta().then(tick), 5000); };
+document.getElementById("auto").onchange = (e) => {
+  if (e.target.checked) startTimer();
+  else clearInterval(timer);
+};
+
+(async () => {
+  await fetchMeta();
+  populateStockSelect();
+  populateFeedSelect();
+  await tick();
+  startTimer();
+})();
+</script>
+</body>
+</html>

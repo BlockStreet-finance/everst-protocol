@@ -1,0 +1,13 @@
+{
+  "name": "pyth-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local monitor that samples BlockStreet's relevant Pyth feeds (COIN session feeds + COINX proxy + redemption rate) from Hermes, stores them in SQLite, and serves a dashboard.",
+  "scripts": {
+    "start": "node --experimental-sqlite index.js"
+  },
+  "engines": {
+    "node": ">=22.5"
+  }
+}
