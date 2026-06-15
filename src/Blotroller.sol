@@ -526,11 +526,16 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
         address liquidator,
         address borrower,
         uint repayAmount) override external returns (uint) {
-        // Shh - currently unused
-        liquidator;
-
         if (!markets[bTokenBorrowed].isListed || !markets[bTokenCollateral].isListed) {
             return uint(Error.MARKET_NOT_LISTED);
+        }
+
+        // Liquidator whitelist (spec §7.1): when an access controller is set and its
+        // liquidator gate is enabled, only whitelisted liquidators may liquidate.
+        // address(0) controller or a disabled gate => anyone may liquidate.
+        address _accessController = accessController;
+        if (_accessController != address(0) && !IAccessController(_accessController).isAllowedToLiquidate(liquidator)) {
+            return uint(Error.REJECTION);
         }
 
         uint borrowBalance = BToken(bTokenBorrowed).borrowBalanceStored(borrower);

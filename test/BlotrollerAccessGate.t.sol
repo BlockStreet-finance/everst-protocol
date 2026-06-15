@@ -210,4 +210,51 @@ contract BlotrollerAccessGateTest is Test {
         err = blotroller.borrowAllowed(address(bToken), bob, 0);
         assertEq(err, uint(BlotrollerErrorReporter.Error.REJECTION));
     }
+
+    // -------------------------------------------------------------------------
+    // liquidateBorrowAllowed gate (spec §7.1 liquidator whitelist)
+    //
+    // The gate is checked after the markets-listed check. A non-whitelisted
+    // liquidator returns REJECTION; a whitelisted one passes the gate and falls
+    // through to the shortfall check (INSUFFICIENT_SHORTFALL here, since the
+    // borrower has no debt) — i.e. NOT REJECTION. We use one listed market as
+    // both the borrowed and collateral side.
+    // -------------------------------------------------------------------------
+
+    uint internal constant REJECTION = uint(BlotrollerErrorReporter.Error.REJECTION);
+
+    function _liquidateAllowed(address liquidator) internal returns (uint) {
+        return blotroller.liquidateBorrowAllowed(address(bToken), address(bToken), liquidator, alice, 0);
+    }
+
+    function test_liquidate_noController_anyoneAllowed() public {
+        assertTrue(_liquidateAllowed(bob) != REJECTION, "no controller -> anyone may liquidate");
+    }
+
+    function test_liquidate_gateDisabledByDefault_anyoneAllowed() public {
+        blotroller._setAccessController(address(ac)); // controller set, but liquidator gate OFF by default
+        assertFalse(ac.liquidatorGateEnabled());
+        assertTrue(_liquidateAllowed(bob) != REJECTION, "gate off -> anyone may liquidate");
+    }
+
+    function test_liquidate_gateEnabled_nonWhitelisted_returnsRejection() public {
+        blotroller._setAccessController(address(ac));
+        ac.setLiquidatorGateEnabled(true);
+        assertEq(_liquidateAllowed(bob), REJECTION, "non-whitelisted liquidator rejected");
+    }
+
+    function test_liquidate_gateEnabled_whitelisted_passesGate() public {
+        blotroller._setAccessController(address(ac));
+        ac.setLiquidatorGateEnabled(true);
+        ac.setLiquidator(bob, true);
+        assertTrue(_liquidateAllowed(bob) != REJECTION, "whitelisted liquidator passes the gate");
+    }
+
+    function test_liquidate_enablingMintGateDoesNotBlockLiquidation() public {
+        // Footgun guard: turning on the mint/borrow allowlist must NOT block liquidation,
+        // because the liquidator gate is independent and defaults to OFF.
+        blotroller._setAccessController(address(ac));
+        ac.setAllowed(alice, true); // configure the depositor allowlist only
+        assertTrue(_liquidateAllowed(bob) != REJECTION, "mint gate must not block liquidation");
+    }
 }
