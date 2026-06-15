@@ -7,7 +7,7 @@ import "../PriceOracle.sol";
 import "../EIP20Interface.sol";
 
 interface BlotrollerLensInterface {
-    function markets(address) external view returns (bool, uint);
+    function markets(address) external view returns (bool, uint, uint);
     function oracle() external view returns (PriceOracle);
     function getAccountLiquidity(address) external view returns (uint, uint, uint);
     function getAssetsIn(address) external view returns (BToken[] memory);
@@ -50,6 +50,7 @@ contract BlockStreetLens {
         uint totalCash;
         bool isListed;
         uint collateralFactorMantissa;
+        uint borrowFactorMantissa;
         address underlyingAssetAddress;
         uint bTokenDecimals;
         uint underlyingDecimals;
@@ -60,7 +61,7 @@ contract BlockStreetLens {
     function bTokenMetadata(BToken bToken) public returns (BTokenMetadata memory) {
         uint exchangeRateCurrent = bToken.exchangeRateCurrent();
         BlotrollerLensInterface comptroller = BlotrollerLensInterface(address(bToken.comptroller()));
-        (bool isListed, uint collateralFactorMantissa) = comptroller.markets(address(bToken));
+        (bool isListed, uint collateralFactorMantissa, uint borrowFactorMantissa) = comptroller.markets(address(bToken));
         address underlyingAssetAddress;
         uint underlyingDecimals;
 
@@ -97,6 +98,7 @@ contract BlockStreetLens {
             totalCash: bToken.getCash(),
             isListed: isListed,
             collateralFactorMantissa: collateralFactorMantissa,
+            borrowFactorMantissa: borrowFactorMantissa,
             underlyingAssetAddress: underlyingAssetAddress,
             bTokenDecimals: bToken.decimals(),
             underlyingDecimals: underlyingDecimals,

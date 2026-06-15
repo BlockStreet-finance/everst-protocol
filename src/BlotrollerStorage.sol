@@ -57,14 +57,21 @@ contract BlotrollerStorage is UnitrollerAdminStorage {
         // Whether or not this market is listed
         bool isListed;
 
-        //  Multiplier representing the most one can borrow against their collateral in this market.
-        //  For instance, 0.9 to allow borrowing 90% of collateral value.
-        //  Must be between 0 and 1, and stored as a mantissa.
+        //  LIQUIDATION line (liquidation threshold). Multiplier representing how much debt the
+        //  collateral can carry before the position becomes liquidatable. Used ONLY by the
+        //  liquidation/shortfall path. Must be between 0 and 1, stored as a mantissa.
+        //  (Name kept as `collateralFactorMantissa` for storage/ABI continuity.)
         uint collateralFactorMantissa;
 
         // Per-market mapping of "accounts in this asset"
         mapping(address => bool) accountMembership;
 
+        //  BORROW line. Multiplier representing the most one can borrow against this collateral
+        //  when opening/extending a position. Used ONLY by the borrow/redeem path, never by
+        //  liquidation. Invariant: borrowFactorMantissa <= collateralFactorMantissa.
+        //  Lowering it only blocks NEW borrows; it can never make an existing position
+        //  liquidatable. Appended at the end of the struct for storage-layout safety.
+        uint borrowFactorMantissa;
     }
 
     /**
@@ -121,4 +128,22 @@ contract BlotrollerStorage is UnitrollerAdminStorage {
     ///      IAccessController(accessController).isAllowedToMint/Borrow on every
     ///      mint/borrow and reverts if it returns false.
     address public accessController;
+
+    /// @notice Risk keeper (CF_KEEPER) allowed to LOWER borrowFactor immediately, without timelock.
+    /// @dev Fast de-risk path. May only reduce borrowFactor (never raise). Raising borrowFactor and
+    ///      any liquidationThreshold change stays admin-only (admin is expected to be a Timelock).
+    address public cfKeeper;
+
+    /// @notice Max single-step reduction of a market's liquidationThreshold (collateralFactor), as a mantissa.
+    /// @dev Guards against pushing borderline users into shortfall in one move. 0 = unlimited (disabled).
+    uint public liquidationThresholdMaxReductionMantissa;
+
+    /// @notice Global borrow haircut set by RISK_KEEPER, driven by overall protocol LTV (spec §10.2).
+    uint public keeperHaircutMantissa;
+
+    /// @notice Global borrow haircut set by the GUARDIAN — manual emergency lever (100% = halt all new borrows).
+    uint public guardianHaircutMantissa;
+
+    /// @notice RISK_KEEPER: may RAISE keeperHaircut (tighten) immediately; lowering is admin-only.
+    address public riskKeeper;
 }
