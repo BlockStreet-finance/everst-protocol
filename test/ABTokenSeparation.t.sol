@@ -481,10 +481,15 @@ contract ABTokenSeparationTest is Test {
         blotroller._setTokenType(BToken(address(bTokenB)), BlotrollerStorage.TokenType.TYPE_B);
         // bTokenC remains unclassified
         
-        // Set collateral factors (80%)
+        // Set collateral factors / liquidation thresholds (80%)
         blotroller._setCollateralFactor(BToken(address(bTokenA)), 800000000000000000);
         blotroller._setCollateralFactor(BToken(address(bTokenB)), 800000000000000000);
         blotroller._setCollateralFactor(BToken(address(bTokenC)), 800000000000000000);
+
+        // Set borrow factors equal to the liquidation threshold (single-line equivalent behavior)
+        blotroller._setBorrowFactor(BToken(address(bTokenA)), 800000000000000000);
+        blotroller._setBorrowFactor(BToken(address(bTokenB)), 800000000000000000);
+        blotroller._setBorrowFactor(BToken(address(bTokenC)), 800000000000000000);
         
         // Give tokens to user1 for testing
         tokenA.transfer(user1, 10000 * 10**18);

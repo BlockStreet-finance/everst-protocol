@@ -26,8 +26,26 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
     /// @notice Emitted when close factor is changed by admin
     event NewCloseFactor(uint oldCloseFactorMantissa, uint newCloseFactorMantissa);
 
-    /// @notice Emitted when a collateral factor is changed by admin
+    /// @notice Emitted when a collateral factor (liquidation threshold) is changed by admin
     event NewCollateralFactor(BToken bToken, uint oldCollateralFactorMantissa, uint newCollateralFactorMantissa);
+
+    /// @notice Emitted when a market's borrow factor (borrow line) is changed
+    event NewBorrowFactor(BToken bToken, uint oldBorrowFactorMantissa, uint newBorrowFactorMantissa);
+
+    /// @notice Emitted when the CF keeper (fast borrowFactor de-risk role) is changed
+    event NewCfKeeper(address oldCfKeeper, address newCfKeeper);
+
+    /// @notice Emitted when the liquidation threshold max single-step reduction is changed
+    event NewLiquidationThresholdMaxReduction(uint oldMantissa, uint newMantissa);
+
+    /// @notice Emitted when the keeper global borrow haircut changes
+    event NewKeeperHaircut(uint oldMantissa, uint newMantissa);
+
+    /// @notice Emitted when the guardian global borrow haircut changes
+    event NewGuardianHaircut(uint oldMantissa, uint newMantissa);
+
+    /// @notice Emitted when the risk keeper address changes
+    event NewRiskKeeper(address oldRiskKeeper, address newRiskKeeper);
 
     /// @notice Emitted when liquidation incentive is changed by admin
     event NewLiquidationIncentive(uint oldLiquidationIncentiveMantissa, uint newLiquidationIncentiveMantissa);
@@ -281,8 +299,8 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
             // Get token type being redeemed
             TokenType redeemTokenType = tokenTypes[bToken];
             
-            (Error err, uint liquidityA, uint shortfallA, uint liquidityB, uint shortfallB) = 
-                getHypotheticalAccountLiquidityInternalSeparated(redeemer, BToken(bToken), redeemTokens, 0);
+            (Error err, uint liquidityA, uint shortfallA, uint liquidityB, uint shortfallB) =
+                getHypotheticalAccountLiquidityInternalSeparated(redeemer, BToken(bToken), redeemTokens, 0, RiskMode.BORROW);
             
             if (err != Error.NO_ERROR) {
                 return uint(err);
@@ -303,7 +321,7 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
             // Non-classified tokens can be redeemed freely in separation mode
         } else {
             // Original logic for non-separation mode
-            (Error err, , uint shortfall) = getHypotheticalAccountLiquidityInternal(redeemer, BToken(bToken), redeemTokens, 0);
+            (Error err, , uint shortfall) = getHypotheticalAccountLiquidityInternal(redeemer, BToken(bToken), redeemTokens, 0, RiskMode.BORROW);
             if (err != Error.NO_ERROR) {
                 return uint(err);
             }
@@ -391,8 +409,8 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
                 return uint(Error.MARKET_NOT_LISTED); // Reuse this error for non-classified tokens in separation mode
             }
             
-            (Error err, uint liquidityA, uint shortfallA, uint liquidityB, uint shortfallB) = 
-                getHypotheticalAccountLiquidityInternalSeparated(borrower, BToken(bToken), 0, borrowAmount);
+            (Error err, uint liquidityA, uint shortfallA, uint liquidityB, uint shortfallB) =
+                getHypotheticalAccountLiquidityInternalSeparated(borrower, BToken(bToken), 0, borrowAmount, RiskMode.BORROW);
             
             if (err != Error.NO_ERROR) {
                 return uint(err);
@@ -411,7 +429,7 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
             }
         } else {
             // Original logic for non-separation mode
-            (Error err, , uint shortfall) = getHypotheticalAccountLiquidityInternal(borrower, BToken(bToken), 0, borrowAmount);
+            (Error err, , uint shortfall) = getHypotheticalAccountLiquidityInternal(borrower, BToken(bToken), 0, borrowAmount, RiskMode.BORROW);
             if (err != Error.NO_ERROR) {
                 return uint(err);
             }
@@ -526,13 +544,13 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
                 // In separation mode, check shortfall based on borrowed token type
                 TokenType borrowedTokenType = tokenTypes[bTokenBorrowed];
                 
-                (Error err, uint liquidityA, uint shortfallA, uint liquidityB, uint shortfallB) = 
-                    getHypotheticalAccountLiquidityInternalSeparated(borrower, BToken(address(0)), 0, 0);
-                
+                (Error err, uint liquidityA, uint shortfallA, uint liquidityB, uint shortfallB) =
+                    getHypotheticalAccountLiquidityInternalSeparated(borrower, BToken(address(0)), 0, 0, RiskMode.LIQUIDATION);
+
                 if (err != Error.NO_ERROR) {
                     return uint(err);
                 }
-                
+
                 // Check shortfall for the appropriate type
                 uint relevantShortfall = 0;
                 if (borrowedTokenType == TokenType.TYPE_A) {
@@ -708,6 +726,14 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
      *  Note that `bTokenBalance` is the number of bTokens the account owns in the market,
      *  whereas `borrowBalance` is the amount of underlying that the account has borrowed.
      */
+    /// @notice Which collateral line a liquidity computation should use.
+    /// @dev BORROW reads borrowFactor (gates new borrows/redeems); LIQUIDATION reads
+    ///      collateralFactor = liquidation threshold (gates shortfall/liquidation).
+    enum RiskMode {
+        BORROW,
+        LIQUIDATION
+    }
+
     struct AccountLiquidityLocalVars {
         uint sumCollateral;
         uint sumBorrowPlusEffects;
@@ -734,13 +760,45 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
     }
 
     /**
+     * @notice Pick the collateral line for a market depending on the risk context.
+     * @dev BORROW -> borrowFactor (gates new exposure); LIQUIDATION -> collateralFactor
+     *      (liquidation threshold, gates shortfall). This single switch is what keeps
+     *      "lowering borrowFactor only blocks new borrows, never touches existing positions".
+     */
+    function collateralLineMantissa(address asset, RiskMode mode) internal view returns (uint) {
+        // LIQUIDATION line is never touched by the global haircut (fail-safe: the haircut
+        // only restricts NEW borrows, it can never make an existing position liquidatable).
+        if (mode == RiskMode.LIQUIDATION) {
+            return markets[asset].collateralFactorMantissa;
+        }
+        // BORROW line, scaled down by the global borrow haircut (spec §10.2):
+        //   effective borrowFactor = borrowFactor × (1 − globalBorrowHaircut)
+        uint borrowFactor = markets[asset].borrowFactorMantissa;
+        uint haircut = effectiveBorrowHaircutMantissa();
+        if (haircut == 0) return borrowFactor;
+        if (haircut >= 1e18) return 0;
+        return borrowFactor * (1e18 - haircut) / 1e18;
+    }
+
+    /**
+     * @notice The global borrow haircut currently in effect = max(keeperHaircut, guardianHaircut),
+     *         capped at 1e18. Multiplies every collateral market's borrowFactor; never the
+     *         liquidation threshold.
+     */
+    function effectiveBorrowHaircutMantissa() public view returns (uint) {
+        uint h = keeperHaircutMantissa > guardianHaircutMantissa ? keeperHaircutMantissa : guardianHaircutMantissa;
+        return h > 1e18 ? 1e18 : h;
+    }
+
+    /**
      * @notice Determine the current account liquidity wrt collateral requirements
      * @return (possible error code (semi-opaque),
                 account liquidity in excess of collateral requirements,
      *          account shortfall below collateral requirements)
      */
     function getAccountLiquidity(address account) public view returns (uint, uint, uint) {
-        (Error err, uint liquidity, uint shortfall) = getHypotheticalAccountLiquidityInternal(account, BToken(address(0)), 0, 0);
+        // LIQUIDATION line: reports health "how far from being liquidatable".
+        (Error err, uint liquidity, uint shortfall) = getHypotheticalAccountLiquidityInternal(account, BToken(address(0)), 0, 0, RiskMode.LIQUIDATION);
 
         return (uint(err), liquidity, shortfall);
     }
@@ -752,7 +810,8 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
      *          account shortfall below collateral requirements)
      */
     function getAccountLiquidityInternal(address account) internal view returns (Error, uint, uint) {
-        return getHypotheticalAccountLiquidityInternal(account, BToken(address(0)), 0, 0);
+        // Only consumed by the liquidation path -> LIQUIDATION line (liquidation threshold).
+        return getHypotheticalAccountLiquidityInternal(account, BToken(address(0)), 0, 0, RiskMode.LIQUIDATION);
     }
 
     /**
@@ -770,7 +829,8 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
         address bTokenModify,
         uint redeemTokens,
         uint borrowAmount) public view returns (uint, uint, uint) {
-        (Error err, uint liquidity, uint shortfall) = getHypotheticalAccountLiquidityInternal(account, BToken(bTokenModify), redeemTokens, borrowAmount);
+        // Simulates a borrow/redeem -> BORROW line (borrow factor).
+        (Error err, uint liquidity, uint shortfall) = getHypotheticalAccountLiquidityInternal(account, BToken(bTokenModify), redeemTokens, borrowAmount, RiskMode.BORROW);
         return (uint(err), liquidity, shortfall);
     }
 
@@ -790,7 +850,8 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
         address account,
         BToken bTokenModify,
         uint redeemTokens,
-        uint borrowAmount) internal view returns (Error, uint, uint) {
+        uint borrowAmount,
+        RiskMode mode) internal view returns (Error, uint, uint) {
 
         AccountLiquidityLocalVars memory vars; // Holds all our calculation results
         uint oErr;
@@ -805,7 +866,7 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
             if (oErr != 0) { // semi-opaque error code, we assume NO_ERROR == 0 is invariant between upgrades
                 return (Error.SNAPSHOT_ERROR, 0, 0);
             }
-            vars.collateralFactor = Exp({mantissa: markets[address(asset)].collateralFactorMantissa});
+            vars.collateralFactor = Exp({mantissa: collateralLineMantissa(address(asset), mode)});
             vars.exchangeRate = Exp({mantissa: vars.exchangeRateMantissa});
 
             // Get the normalized price of the asset
@@ -850,7 +911,8 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
     function _processSeparatedAsset(
         BToken asset,
         address account,
-        SeparatedLiquidityLocalVars memory sepVars
+        SeparatedLiquidityLocalVars memory sepVars,
+        RiskMode mode
     ) internal view returns (Error) {
         (uint oErr, uint bTokenBalance, uint borrowBalance, uint exchangeRateMantissa) = asset.getAccountSnapshot(account);
         if (oErr != 0) {
@@ -862,8 +924,8 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
             return Error.PRICE_ERROR;
         }
 
-        uint collateralFactorMantissa = markets[address(asset)].collateralFactorMantissa;
-        
+        uint collateralFactorMantissa = collateralLineMantissa(address(asset), mode);
+
         // Calculate collateral and borrow values
         uint collateralValue = mul_ScalarTruncate(
             mul_(mul_(Exp({mantissa: collateralFactorMantissa}), Exp({mantissa: exchangeRateMantissa})), Exp({mantissa: oraclePriceMantissa})),
@@ -895,7 +957,8 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
         address account,
         uint redeemTokens,
         uint borrowAmount,
-        SeparatedLiquidityLocalVars memory sepVars
+        SeparatedLiquidityLocalVars memory sepVars,
+        RiskMode mode
     ) internal view returns (Error) {
         if (address(bTokenModify) == address(0)) {
             return Error.NO_ERROR;
@@ -907,7 +970,7 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
             return Error.PRICE_ERROR;
         }
 
-        uint collateralFactorMantissa = markets[address(bTokenModify)].collateralFactorMantissa;
+        uint collateralFactorMantissa = collateralLineMantissa(address(bTokenModify), mode);
         TokenType tokenType = tokenTypes[address(bTokenModify)];
 
         if (tokenType == TokenType.TYPE_A) {
@@ -943,21 +1006,22 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
         address account,
         BToken bTokenModify,
         uint redeemTokens,
-        uint borrowAmount) internal view returns (Error, uint, uint, uint, uint) {
+        uint borrowAmount,
+        RiskMode mode) internal view returns (Error, uint, uint, uint, uint) {
 
         SeparatedLiquidityLocalVars memory sepVars;
 
         // Process each asset
         BToken[] memory assets = accountAssets[account];
         for (uint i = 0; i < assets.length; i++) {
-            Error assetErr = _processSeparatedAsset(assets[i], account, sepVars);
+            Error assetErr = _processSeparatedAsset(assets[i], account, sepVars, mode);
             if (assetErr != Error.NO_ERROR) {
                 return (assetErr, 0, 0, 0, 0);
             }
         }
 
         // Apply hypothetical effects
-        Error effectsErr = _applySeparatedEffects(bTokenModify, account, redeemTokens, borrowAmount, sepVars);
+        Error effectsErr = _applySeparatedEffects(bTokenModify, account, redeemTokens, borrowAmount, sepVars, mode);
         if (effectsErr != Error.NO_ERROR) {
             return (effectsErr, 0, 0, 0, 0);
         }
@@ -1081,18 +1145,153 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
             return fail(Error.INVALID_COLLATERAL_FACTOR, FailureInfo.SET_COLLATERAL_FACTOR_VALIDATION);
         }
 
+        // Two-line invariant: the liquidation threshold may never drop below the borrow line.
+        if (newCollateralFactorMantissa < market.borrowFactorMantissa) {
+            return fail(Error.INVALID_COLLATERAL_FACTOR, FailureInfo.SET_COLLATERAL_FACTOR_VALIDATION);
+        }
+
+        uint oldCollateralFactorMantissa = market.collateralFactorMantissa;
+
+        // Step limit: lowering the liquidation threshold makes existing positions more liquidatable,
+        // so cap how far it can move in a single change to avoid pushing borderline users into
+        // shortfall all at once. 0 = disabled.
+        if (liquidationThresholdMaxReductionMantissa != 0 && newCollateralFactorMantissa < oldCollateralFactorMantissa) {
+            if (oldCollateralFactorMantissa - newCollateralFactorMantissa > liquidationThresholdMaxReductionMantissa) {
+                return fail(Error.INVALID_COLLATERAL_FACTOR, FailureInfo.SET_COLLATERAL_FACTOR_VALIDATION);
+            }
+        }
+
         // If collateral factor != 0, fail if price == 0
         if (newCollateralFactorMantissa != 0 && oracle.getUnderlyingPrice(bToken) == 0) {
             return fail(Error.PRICE_ERROR, FailureInfo.SET_COLLATERAL_FACTOR_WITHOUT_PRICE);
         }
 
-        // Set market's collateral factor to new collateral factor, remember old value
-        uint oldCollateralFactorMantissa = market.collateralFactorMantissa;
+        // Set market's collateral factor (liquidation threshold) to new value
         market.collateralFactorMantissa = newCollateralFactorMantissa;
 
         // Emit event with asset, old collateral factor, and new collateral factor
         emit NewCollateralFactor(bToken, oldCollateralFactorMantissa, newCollateralFactorMantissa);
 
+        return uint(Error.NO_ERROR);
+    }
+
+    /**
+      * @notice Sets the borrowFactor (borrow line) for a market.
+      * @dev Asymmetric access:
+      *      - admin (expected to be a Timelock) may set any value <= the liquidation threshold;
+      *        raising borrowFactor re-enables leverage and is therefore gated by the admin/timelock.
+      *      - cfKeeper may ONLY lower borrowFactor, immediately and without timelock — a fast
+      *        de-risk path that can never make an existing position liquidatable (borrowFactor is
+      *        not used by the liquidation path).
+      * @param bToken The market to set the borrow factor on
+      * @param newBorrowFactorMantissa The new borrow factor, scaled by 1e18
+      * @return uint 0=success, otherwise a failure
+      */
+    function _setBorrowFactor(BToken bToken, uint newBorrowFactorMantissa) external returns (uint) {
+        Market storage market = markets[address(bToken)];
+        if (!market.isListed) {
+            return fail(Error.MARKET_NOT_LISTED, FailureInfo.SET_COLLATERAL_FACTOR_NO_EXISTS);
+        }
+
+        uint oldBorrowFactorMantissa = market.borrowFactorMantissa;
+
+        bool isAdmin = msg.sender == admin;
+        bool isKeeperLowering = msg.sender == cfKeeper && newBorrowFactorMantissa < oldBorrowFactorMantissa;
+        if (!isAdmin && !isKeeperLowering) {
+            return fail(Error.UNAUTHORIZED, FailureInfo.SET_COLLATERAL_FACTOR_OWNER_CHECK);
+        }
+
+        // Two-line invariant: borrowFactor <= liquidationThreshold (collateralFactor).
+        if (newBorrowFactorMantissa > market.collateralFactorMantissa) {
+            return fail(Error.INVALID_COLLATERAL_FACTOR, FailureInfo.SET_COLLATERAL_FACTOR_VALIDATION);
+        }
+
+        market.borrowFactorMantissa = newBorrowFactorMantissa;
+        emit NewBorrowFactor(bToken, oldBorrowFactorMantissa, newBorrowFactorMantissa);
+
+        return uint(Error.NO_ERROR);
+    }
+
+    /**
+      * @notice Sets the CF keeper allowed to lower borrowFactor without timelock.
+      * @dev Admin only. Set to address(0) to disable the fast de-risk role.
+      */
+    function _setCfKeeper(address newCfKeeper) external returns (uint) {
+        if (msg.sender != admin) {
+            return fail(Error.UNAUTHORIZED, FailureInfo.SET_COLLATERAL_FACTOR_OWNER_CHECK);
+        }
+        address oldCfKeeper = cfKeeper;
+        cfKeeper = newCfKeeper;
+        emit NewCfKeeper(oldCfKeeper, newCfKeeper);
+        return uint(Error.NO_ERROR);
+    }
+
+    /**
+      * @notice Sets the max single-step reduction of any market's liquidation threshold.
+      * @dev Admin only. 0 = unlimited (disabled).
+      */
+    function _setLiquidationThresholdMaxReduction(uint newMantissa) external returns (uint) {
+        if (msg.sender != admin) {
+            return fail(Error.UNAUTHORIZED, FailureInfo.SET_COLLATERAL_FACTOR_OWNER_CHECK);
+        }
+        uint oldMantissa = liquidationThresholdMaxReductionMantissa;
+        liquidationThresholdMaxReductionMantissa = newMantissa;
+        emit NewLiquidationThresholdMaxReduction(oldMantissa, newMantissa);
+        return uint(Error.NO_ERROR);
+    }
+
+    /**
+      * @notice Sets the RISK_KEEPER allowed to RAISE the keeper haircut without timelock.
+      * @dev Admin only. Set to address(0) to disable the fast keeper-tighten path.
+      */
+    function _setRiskKeeper(address newRiskKeeper) external returns (uint) {
+        if (msg.sender != admin) {
+            return fail(Error.UNAUTHORIZED, FailureInfo.SET_PENDING_ADMIN_OWNER_CHECK);
+        }
+        address old = riskKeeper;
+        riskKeeper = newRiskKeeper;
+        emit NewRiskKeeper(old, newRiskKeeper);
+        return uint(Error.NO_ERROR);
+    }
+
+    /**
+      * @notice Sets the keeper global borrow haircut (spec §10.2).
+      * @dev Asymmetric: admin may set any value; riskKeeper may only RAISE it (immediate
+      *      de-risk). Lowering (relaxing) is admin-only (= timelock). Value is a 1e18 mantissa,
+      *      capped at 1e18. Only restricts new borrows — never touches the liquidation line.
+      */
+    function _setKeeperHaircut(uint newHaircutMantissa) external returns (uint) {
+        if (newHaircutMantissa > 1e18) {
+            return fail(Error.INVALID_COLLATERAL_FACTOR, FailureInfo.SET_COLLATERAL_FACTOR_VALIDATION);
+        }
+        bool isAdmin = msg.sender == admin;
+        bool isKeeperRaising = msg.sender == riskKeeper && newHaircutMantissa > keeperHaircutMantissa;
+        if (!isAdmin && !isKeeperRaising) {
+            return fail(Error.UNAUTHORIZED, FailureInfo.SET_PENDING_ADMIN_OWNER_CHECK);
+        }
+        uint old = keeperHaircutMantissa;
+        keeperHaircutMantissa = newHaircutMantissa;
+        emit NewKeeperHaircut(old, newHaircutMantissa);
+        return uint(Error.NO_ERROR);
+    }
+
+    /**
+      * @notice Sets the guardian global borrow haircut — manual emergency lever (spec §10.2).
+      * @dev Asymmetric: the pause guardian may only RAISE it (e.g. to 1e18 = halt all new borrows);
+      *      lowering (lifting the emergency) is admin-only. 1e18 mantissa, capped at 1e18.
+      */
+    function _setGuardianHaircut(uint newHaircutMantissa) external returns (uint) {
+        if (newHaircutMantissa > 1e18) {
+            return fail(Error.INVALID_COLLATERAL_FACTOR, FailureInfo.SET_COLLATERAL_FACTOR_VALIDATION);
+        }
+        bool isAdmin = msg.sender == admin;
+        bool isGuardianRaising = msg.sender == pauseGuardian && newHaircutMantissa > guardianHaircutMantissa;
+        if (!isAdmin && !isGuardianRaising) {
+            return fail(Error.UNAUTHORIZED, FailureInfo.SET_PENDING_ADMIN_OWNER_CHECK);
+        }
+        uint old = guardianHaircutMantissa;
+        guardianHaircutMantissa = newHaircutMantissa;
+        emit NewGuardianHaircut(old, newHaircutMantissa);
         return uint(Error.NO_ERROR);
     }
 
@@ -1139,7 +1338,8 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
 
         Market storage newMarket = markets[address(bToken)];
         newMarket.isListed = true;
-        newMarket.collateralFactorMantissa = 0;
+        newMarket.collateralFactorMantissa = 0; // liquidation threshold
+        newMarket.borrowFactorMantissa = 0;     // borrow line (must be set before borrowing is possible)
 
         _addMarketInternal(address(bToken));
 
@@ -1335,7 +1535,7 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
 
         // Store old type for event
         TokenType oldType = tokenTypes[address(bToken)];
-        
+
         // Set new type
         tokenTypes[address(bToken)] = tokenType;
 
@@ -1378,9 +1578,10 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
             return (uint(Error.COMPTROLLER_MISMATCH), 0, 0, 0, 0); // Reuse error for disabled mode
         }
         
-        (Error err, uint liquidityA, uint shortfallA, uint liquidityB, uint shortfallB) = 
-            getHypotheticalAccountLiquidityInternalSeparated(account, BToken(address(0)), 0, 0);
-        
+        // LIQUIDATION line: reports health.
+        (Error err, uint liquidityA, uint shortfallA, uint liquidityB, uint shortfallB) =
+            getHypotheticalAccountLiquidityInternalSeparated(account, BToken(address(0)), 0, 0, RiskMode.LIQUIDATION);
+
         return (uint(err), liquidityA, shortfallA, liquidityB, shortfallB);
     }
 
@@ -1402,9 +1603,10 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
             return (uint(Error.COMPTROLLER_MISMATCH), 0, 0, 0, 0); // Reuse error for disabled mode
         }
         
-        (Error err, uint liquidityA, uint shortfallA, uint liquidityB, uint shortfallB) = 
-            getHypotheticalAccountLiquidityInternalSeparated(account, BToken(bTokenModify), redeemTokens, borrowAmount);
-        
+        // Simulates a borrow/redeem -> BORROW line.
+        (Error err, uint liquidityA, uint shortfallA, uint liquidityB, uint shortfallB) =
+            getHypotheticalAccountLiquidityInternalSeparated(account, BToken(bTokenModify), redeemTokens, borrowAmount, RiskMode.BORROW);
+
         return (uint(err), liquidityA, shortfallA, liquidityB, shortfallB);
     }
 
