@@ -25,6 +25,15 @@ contract MockPyth is IPyth {
         });
     }
 
+    // Full control over conf and publishTime — needed to test staleness and the conf gate.
+    function setPriceFull(bytes32 id, int64 price, uint64 conf, int32 expo, uint64 publishTime) public {
+        prices[id] = PythStructs.Price({price: price, conf: conf, expo: expo, publishTime: publishTime});
+    }
+
+    function clearPrice(bytes32 id) public {
+        delete prices[id];
+    }
+
     function getPriceUnsafe(bytes32 id) external view override returns (PythStructs.Price memory) {
         return prices[id];
     }
