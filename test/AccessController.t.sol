@@ -136,4 +136,45 @@ contract AccessControllerTest is Test {
         vm.expectRevert(bytes("AccessController: not pending admin"));
         ac._acceptAdmin();
     }
+
+    // ---- liquidator whitelist (spec §7.1) ----
+
+    function test_liquidate_gateOffByDefault_anyoneAllowed() public {
+        assertFalse(ac.liquidatorGateEnabled());
+        assertTrue(ac.isAllowedToLiquidate(bob), "gate off -> anyone allowed");
+    }
+
+    function test_liquidate_gateEnabled_onlyWhitelisted() public {
+        vm.prank(admin);
+        ac.setLiquidatorGateEnabled(true);
+        assertFalse(ac.isAllowedToLiquidate(bob), "non-whitelisted denied when gate on");
+
+        vm.prank(admin);
+        ac.setLiquidator(bob, true);
+        assertTrue(ac.isAllowedToLiquidate(bob), "whitelisted allowed");
+    }
+
+    function test_setLiquidator_onlyAdmin() public {
+        vm.prank(bob);
+        vm.expectRevert(bytes("AccessController: not admin"));
+        ac.setLiquidator(bob, true);
+    }
+
+    function test_setLiquidatorGateEnabled_onlyAdmin() public {
+        vm.prank(bob);
+        vm.expectRevert(bytes("AccessController: not admin"));
+        ac.setLiquidatorGateEnabled(true);
+    }
+
+    function test_setLiquidatorBatch_grantsAll() public {
+        address[] memory xs = new address[](2);
+        xs[0] = bob; xs[1] = carol;
+        vm.startPrank(admin);
+        ac.setLiquidatorGateEnabled(true);
+        ac.setLiquidatorBatch(xs, true);
+        vm.stopPrank();
+        assertTrue(ac.isAllowedToLiquidate(bob));
+        assertTrue(ac.isAllowedToLiquidate(carol));
+        assertFalse(ac.isAllowedToLiquidate(alice));
+    }
 }

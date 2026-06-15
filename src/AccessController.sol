@@ -4,6 +4,7 @@ pragma solidity ^0.8.10;
 interface IAccessController {
     function isAllowedToMint(address user) external view returns (bool);
     function isAllowedToBorrow(address user) external view returns (bool);
+    function isAllowedToLiquidate(address liquidator) external view returns (bool);
 }
 
 /**
@@ -18,22 +19,25 @@ interface IAccessController {
  *         Blotroller skips all gating when the configured controller is the
  *         zero address, so any user may mint/borrow.
  *
- * @dev    Design decision — only mint and borrow are gated. redeem, repay,
- *         transfer (of bTokens), and seize (liquidation) are intentionally
+ * @dev    Design decision — for the borrower/depositor side, only mint and borrow
+ *         are gated. redeem, repay, and transfer (of bTokens) are intentionally
  *         NOT gated. Rationale:
  *           - Users who were allowlisted and later removed (or who were
  *             present before the gate was enabled) must always be able to
  *             EXIT their positions: withdraw collateral (redeem), repay
- *             debt (repay), and have unhealthy positions liquidated (seize).
- *             Gating these would let a controller mis-configuration trap
- *             user funds or prevent liquidations, which is a solvency risk
- *             for the whole protocol.
- *           - bToken transfers are not gated for the same reason: existing
- *             holders must be able to move their positions out even if the
- *             allowlist later excludes them.
- *         The gate is therefore an ENTRY control (onboarding new exposure),
- *         not a full asset-freeze mechanism. If a full freeze is needed,
- *         use the existing pause guardian (`*GuardianPaused`) instead.
+ *             debt (repay). Gating these would let a controller mis-configuration
+ *             trap user funds, a solvency risk for the whole protocol.
+ *           - bToken transfers are not gated for the same reason.
+ *         The depositor/borrower gate is therefore an ENTRY control (onboarding
+ *         new exposure), not a full asset-freeze mechanism.
+ *
+ *         Liquidation is a SEPARATE role (spec §7.1): liquidation calls may be
+ *         restricted to whitelisted partners via `isAllowedToLiquidate`. This
+ *         gates WHO performs a liquidation, not whether an unhealthy position
+ *         CAN be liquidated — so it does not trap borrowers. It uses its own
+ *         `liquidators` list and an independent `liquidatorGateEnabled` toggle
+ *         (default OFF = anyone may liquidate), so enabling the mint/borrow
+ *         allowlist never accidentally blocks liquidations.
  */
 contract AccessController is IAccessController {
     address public admin;
@@ -41,7 +45,16 @@ contract AccessController is IAccessController {
 
     mapping(address => bool) public allowed;
 
+    /// @notice Whitelist of addresses permitted to perform liquidations (spec §7.1).
+    mapping(address => bool) public liquidators;
+
+    /// @notice When false (default) the liquidator whitelist is bypassed — anyone may
+    ///         liquidate. Enable it to restrict liquidation to whitelisted partners.
+    bool public liquidatorGateEnabled;
+
     event AccessUpdated(address indexed user, bool allowed);
+    event LiquidatorUpdated(address indexed liquidator, bool allowed);
+    event LiquidatorGateToggled(bool enabled);
     event NewPendingAdmin(address oldPendingAdmin, address newPendingAdmin);
     event NewAdmin(address oldAdmin, address newAdmin);
 
@@ -62,9 +75,31 @@ contract AccessController is IAccessController {
         return allowed[user];
     }
 
+    /// @notice Anyone may liquidate while the gate is off; otherwise only whitelisted liquidators.
+    function isAllowedToLiquidate(address liquidator) external view override returns (bool) {
+        return !liquidatorGateEnabled || liquidators[liquidator];
+    }
+
     function setAllowed(address user, bool isAllowed) external onlyAdmin {
         allowed[user] = isAllowed;
         emit AccessUpdated(user, isAllowed);
+    }
+
+    function setLiquidator(address liquidator, bool isAllowed) external onlyAdmin {
+        liquidators[liquidator] = isAllowed;
+        emit LiquidatorUpdated(liquidator, isAllowed);
+    }
+
+    function setLiquidatorBatch(address[] calldata accounts, bool isAllowed) external onlyAdmin {
+        for (uint256 i = 0; i < accounts.length; i++) {
+            liquidators[accounts[i]] = isAllowed;
+            emit LiquidatorUpdated(accounts[i], isAllowed);
+        }
+    }
+
+    function setLiquidatorGateEnabled(bool enabled) external onlyAdmin {
+        liquidatorGateEnabled = enabled;
+        emit LiquidatorGateToggled(enabled);
     }
 
     function setAllowedBatch(address[] calldata users, bool isAllowed) external onlyAdmin {
