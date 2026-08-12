@@ -105,8 +105,12 @@ contract BlotrollerStorage is UnitrollerAdminStorage {
     /// @notice Token classification system for A/B borrowing rules
     /// @dev 0 = Type A, 1 = Type B.
     enum TokenType {
-        TYPE_A,        // 0: When deposited, can only borrow Type B tokens
-        TYPE_B         // 1: When deposited, can only borrow Type A tokens
+        UNCLASSIFIED,  // 0: default for every market that has never been classified.
+                       //    Must exist as its own value: without it an unconfigured market
+                       //    silently reads as TYPE_A, so enabling separation mode on a fresh
+                       //    deployment puts every market on the same line.
+        TYPE_A,        // 1: When deposited, can only borrow Type B tokens
+        TYPE_B         // 2: When deposited, can only borrow Type A tokens
     }
 
     /// @notice Mapping of bToken address to its classification type

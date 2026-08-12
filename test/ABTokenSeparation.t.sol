@@ -167,9 +167,10 @@ contract ABTokenSeparationTest is Test {
         assertEq(result1, 0, "Setting TYPE_A should succeed");
         assertEq(result2, 0, "Setting TYPE_B should succeed");
         
-        // Verify token types (TYPE_A = 0, TYPE_B = 1)
-        assertEq(uint256(blotroller.tokenTypes(address(bTokenA))), 0, "bTokenA should be TYPE_A");
-        assertEq(uint256(blotroller.tokenTypes(address(bTokenB))), 1, "bTokenB should be TYPE_B");
+        // Verify token types (UNCLASSIFIED = 0, TYPE_A = 1, TYPE_B = 2)
+        assertEq(uint256(blotroller.tokenTypes(address(bTokenA))), 1, "bTokenA should be TYPE_A");
+        assertEq(uint256(blotroller.tokenTypes(address(bTokenB))), 2, "bTokenB should be TYPE_B");
+        assertEq(uint256(blotroller.tokenTypes(address(bTokenC))), 0, "unset market stays UNCLASSIFIED");
         
         vm.stopPrank();
     }
@@ -188,17 +189,66 @@ contract ABTokenSeparationTest is Test {
     // ============================================================
     
     function test_AdminCanEnableSeparationMode() public {
+        _setupTokenTypes(); // both lines have to exist before the mode can be turned on
+
         vm.startPrank(admin);
-        
+
         // Initially disabled
         assertFalse(blotroller.separationModeEnabled(), "Separation mode should be disabled initially");
-        
+
         // Enable separation mode
         uint256 result = blotroller._setSeparationMode(true);
         assertEq(result, 0, "Enabling separation mode should succeed");
         assertTrue(blotroller.separationModeEnabled(), "Separation mode should be enabled");
-        
+
         vm.stopPrank();
+    }
+
+    function test_Fail_EnableSeparationModeWithNoMarkets() public {
+        vm.prank(admin);
+        assertEq(
+            blotroller._setSeparationMode(true),
+            uint256(BlotrollerErrorReporter.Error.REJECTION),
+            "cannot enable separation mode before any market is classified"
+        );
+        assertFalse(blotroller.separationModeEnabled(), "must stay off");
+    }
+
+    function test_Fail_EnableSeparationModeWithOnlyOneLine() public {
+        vm.startPrank(admin);
+        blotroller._supportMarket(BToken(address(bTokenA)));
+        blotroller._supportMarket(BToken(address(bTokenB)));
+        blotroller._setTokenType(BToken(address(bTokenA)), BlotrollerStorage.TokenType.TYPE_A);
+        blotroller._setTokenType(BToken(address(bTokenB)), BlotrollerStorage.TokenType.TYPE_A);
+
+        assertEq(
+            blotroller._setSeparationMode(true),
+            uint256(BlotrollerErrorReporter.Error.REJECTION),
+            "every market on one line leaves the other line with no collateral at all"
+        );
+        vm.stopPrank();
+    }
+
+    function test_Fail_EnableSeparationModeWithUnclassifiedMarket() public {
+        _setupTokenTypes(); // classifies A and B
+
+        vm.startPrank(admin);
+        blotroller._supportMarket(BToken(address(bTokenC))); // listed, never classified
+        assertEq(
+            blotroller._setSeparationMode(true),
+            uint256(BlotrollerErrorReporter.Error.REJECTION),
+            "an unclassified listed market belongs to neither line"
+        );
+
+        blotroller._setTokenType(BToken(address(bTokenC)), BlotrollerStorage.TokenType.TYPE_A);
+        assertEq(blotroller._setSeparationMode(true), 0, "succeeds once every market is classified");
+        vm.stopPrank();
+    }
+
+    function test_DisablingSeparationModeIsAlwaysAllowed() public {
+        _setupSeparationMode();
+        vm.prank(admin);
+        assertEq(blotroller._setSeparationMode(false), 0, "falling back to the single pool needs no checks");
     }
     
     function test_Fail_NonAdminCannotChangeSeparationMode() public {
@@ -219,12 +269,67 @@ contract ABTokenSeparationTest is Test {
         
         vm.startPrank(admin);
         
-        // Change TYPE_A to TYPE_B
+        // Change TYPE_A to TYPE_B -- allowed here because separation mode is off
         uint256 result = blotroller._setTokenType(BToken(address(bTokenA)), BlotrollerStorage.TokenType.TYPE_B);
         assertEq(result, 0, "Changing token type should succeed");
-        assertEq(uint256(blotroller.tokenTypes(address(bTokenA))), 1, "bTokenA should now be TYPE_B");
-        
+        assertEq(uint256(blotroller.tokenTypes(address(bTokenA))), 2, "bTokenA should now be TYPE_B");
+
         vm.stopPrank();
+    }
+
+    function test_Fail_CannotRetypeLiveMarketWhileSeparationModeIsOn() public {
+        _setupSeparationModeWithCollateral();
+
+        // Give the market a live position.
+        vm.startPrank(user1);
+        tokenA.approve(address(bTokenA), 1000 * 10**18);
+        bTokenA.mint(1000 * 10**18);
+        vm.stopPrank();
+
+        vm.prank(admin);
+        assertEq(
+            blotroller._setTokenType(BToken(address(bTokenA)), BlotrollerStorage.TokenType.TYPE_B),
+            uint256(BlotrollerErrorReporter.Error.REJECTION),
+            "retyping a market with live positions rewrites both lines under its holders"
+        );
+        assertEq(uint256(blotroller.tokenTypes(address(bTokenA))), 1, "type unchanged");
+    }
+
+    /// A market listed while the mode is already on starts UNCLASSIFIED. If someone supplies to
+    /// it before the admin classifies it, refusing the classification would strand it: its
+    /// collateral would count on neither line and it could never be fixed without draining it.
+    /// Classifying an UNCLASSIFIED market is always safe -- it only moves collateral onto a line
+    /// and debt off the line it was double-counted on -- so it must stay allowed.
+    function test_CanClassifyNewlyListedMarketThatAlreadyHasSupply() public {
+        _setupSeparationMode(); // A and B classified, mode on
+
+        vm.startPrank(admin);
+        blotroller._supportMarket(BToken(address(bTokenC))); // listed after the fact -> UNCLASSIFIED
+        assertEq(uint256(blotroller.tokenTypes(address(bTokenC))), 0, "starts unclassified");
+
+        // Someone gets in before the admin classifies it.
+        tokenC.approve(address(bTokenC), 1000 * 10**18);
+        bTokenC.mint(1000 * 10**18);
+        assertGt(BToken(address(bTokenC)).totalSupply(), 0, "market now has a live position");
+
+        assertEq(
+            blotroller._setTokenType(BToken(address(bTokenC)), BlotrollerStorage.TokenType.TYPE_A),
+            0,
+            "classifying an unclassified market must stay possible"
+        );
+        assertEq(uint256(blotroller.tokenTypes(address(bTokenC))), 1, "now TYPE_A");
+        vm.stopPrank();
+    }
+
+    function test_CanRetypeEmptyMarketWhileSeparationModeIsOn() public {
+        _setupSeparationMode(); // markets A and B classified, nothing supplied
+
+        vm.prank(admin);
+        assertEq(
+            blotroller._setTokenType(BToken(address(bTokenA)), BlotrollerStorage.TokenType.TYPE_B),
+            0,
+            "an empty market has no holders to disrupt"
+        );
     }
 
     // ============================================================
@@ -287,16 +392,22 @@ contract ABTokenSeparationTest is Test {
         
         blotroller._setTokenType(BToken(address(bTokenA)), BlotrollerStorage.TokenType.TYPE_A);
         blotroller._setTokenType(BToken(address(bTokenB)), BlotrollerStorage.TokenType.TYPE_B);
-        // bTokenC remains unclassified
-        
-        // 2. Enable separation mode
+        // bTokenC deliberately left unclassified for now
+        assertEq(uint256(blotroller.tokenTypes(address(bTokenC))), 0, "bTokenC should be unclassified");
+
+        // 2. Enabling is refused while a listed market has no line
+        assertEq(
+            blotroller._setSeparationMode(true),
+            uint256(BlotrollerErrorReporter.Error.REJECTION),
+            "unclassified listed market blocks enabling"
+        );
+        blotroller._setTokenType(BToken(address(bTokenC)), BlotrollerStorage.TokenType.TYPE_A);
         blotroller._setSeparationMode(true);
-        
+
         // 3. Verify state
         assertTrue(blotroller.separationModeEnabled(), "Separation mode should be enabled");
-        assertEq(uint256(blotroller.tokenTypes(address(bTokenA))), 0, "bTokenA should be TYPE_A");
-        assertEq(uint256(blotroller.tokenTypes(address(bTokenB))), 1, "bTokenB should be TYPE_B");
-        assertEq(uint256(blotroller.tokenTypes(address(bTokenC))), 0, "bTokenC should be unclassified");
+        assertEq(uint256(blotroller.tokenTypes(address(bTokenA))), 1, "bTokenA should be TYPE_A");
+        assertEq(uint256(blotroller.tokenTypes(address(bTokenB))), 2, "bTokenB should be TYPE_B");
         
         // 4. Test liquidity queries work
         (uint256 err, , , , ) = blotroller.getAccountLiquiditySeparated(user1);
@@ -479,8 +590,9 @@ contract ABTokenSeparationTest is Test {
         // Set token types
         blotroller._setTokenType(BToken(address(bTokenA)), BlotrollerStorage.TokenType.TYPE_A);
         blotroller._setTokenType(BToken(address(bTokenB)), BlotrollerStorage.TokenType.TYPE_B);
-        // bTokenC remains unclassified
-        
+        // Every listed market must carry a line before separation mode can be turned on.
+        blotroller._setTokenType(BToken(address(bTokenC)), BlotrollerStorage.TokenType.TYPE_A);
+
         // Set collateral factors / liquidation thresholds (80%)
         blotroller._setCollateralFactor(BToken(address(bTokenA)), 800000000000000000);
         blotroller._setCollateralFactor(BToken(address(bTokenB)), 800000000000000000);
