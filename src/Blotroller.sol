@@ -299,26 +299,27 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
             // Get token type being redeemed
             TokenType redeemTokenType = tokenTypes[bToken];
             
-            (Error err, uint liquidityA, uint shortfallA, uint liquidityB, uint shortfallB) =
+            (Error err, , uint shortfallA, , uint shortfallB) =
                 getHypotheticalAccountLiquidityInternalSeparated(redeemer, BToken(bToken), redeemTokens, 0, RiskMode.BORROW);
-            
+
             if (err != Error.NO_ERROR) {
                 return uint(err);
             }
-            
-            // Check if redeeming would cause shortfall in the corresponding borrow type
-            // Type A collateral supports Type B borrowing
-            // Type B collateral supports Type A borrowing
+
+            // Withdrawing collateral is checked on the line that collateral secures:
+            // Type A collateral supports Type B borrowing -> line A (shortfallA)
+            // Type B collateral supports Type A borrowing -> line B (shortfallB)
             if (redeemTokenType == TokenType.TYPE_A) {
-                if (shortfallB > 0) {
-                    return uint(Error.INSUFFICIENT_LIQUIDITY);
-                }
-            } else if (redeemTokenType == TokenType.TYPE_B) {
                 if (shortfallA > 0) {
                     return uint(Error.INSUFFICIENT_LIQUIDITY);
                 }
+            } else if (redeemTokenType == TokenType.TYPE_B) {
+                if (shortfallB > 0) {
+                    return uint(Error.INSUFFICIENT_LIQUIDITY);
+                }
             }
-            // Non-classified tokens can be redeemed freely in separation mode
+            // UNCLASSIFIED collateral is counted on neither line, so withdrawing it cannot
+            // open a shortfall on either -- freely redeemable.
         } else {
             // Original logic for non-separation mode
             (Error err, , uint shortfall) = getHypotheticalAccountLiquidityInternal(redeemer, BToken(bToken), redeemTokens, 0, RiskMode.BORROW);
@@ -404,9 +405,10 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
             // Get token type being borrowed
             TokenType borrowTokenType = tokenTypes[bToken];
             
-            // In separation mode, only allow borrowing A/B classified tokens
-            if (borrowTokenType != TokenType.TYPE_A && borrowTokenType != TokenType.TYPE_B) {
-                return uint(Error.MARKET_NOT_LISTED); // Reuse this error for non-classified tokens in separation mode
+            // An unclassified market belongs to neither line, so nothing can secure a debt
+            // taken out in it.
+            if (borrowTokenType == TokenType.UNCLASSIFIED) {
+                return uint(Error.REJECTION);
             }
             
             (Error err, uint liquidityA, uint shortfallA, uint liquidityB, uint shortfallB) =
@@ -538,6 +540,16 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
             return uint(Error.REJECTION);
         }
 
+        // Separation mode pairs every debt with collateral of the OPPOSITE type, and liquidation
+        // is where that pairing has to be cashed in. Seizing same-type collateral would leave the
+        // collateral actually securing this debt untouched, drain a healthy line to cover the
+        // other one, and put two wrapped-stock legs into a single liquidation -- the case the
+        // A/B split exists to rule out. Applies to deprecated markets too: winding a market down
+        // does not make an unclosable liquidation closable.
+        if (separationModeEnabled && tokenTypes[bTokenCollateral] == tokenTypes[bTokenBorrowed]) {
+            return uint(Error.REJECTION);
+        }
+
         uint borrowBalance = BToken(bTokenBorrowed).borrowBalanceStored(borrower);
 
         /* allow accounts to be liquidated if the market is deprecated */
@@ -563,8 +575,9 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
                 } else if (borrowedTokenType == TokenType.TYPE_B) {
                     relevantShortfall = shortfallA; // Type B borrows require Type A collateral
                 } else {
-                    // UNCLASSIFIED tokens shouldn't be borrowable in separation mode
-                    return uint(Error.MARKET_NOT_LISTED);
+                    // UNCLASSIFIED: not borrowable in separation mode, and there is no line
+                    // whose shortfall would justify seizing collateral for it.
+                    return uint(Error.REJECTION);
                 }
                 
                 if (relevantShortfall == 0) {
@@ -648,7 +661,11 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
             return uint(Error.COMPTROLLER_MISMATCH);
         }
 
-
+        // Same line pairing as liquidateBorrowAllowed -- enforced here too because seize is a
+        // separate entry point into the comptroller.
+        if (separationModeEnabled && tokenTypes[bTokenCollateral] == tokenTypes[bTokenBorrowed]) {
+            return uint(Error.REJECTION);
+        }
 
         return uint(Error.NO_ERROR);
     }
@@ -756,12 +773,10 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
      * @dev Separate liquidity calculation results for A/B token separation mode
      */
     struct SeparatedLiquidityLocalVars {
-        uint sumCollateralA;      // Type A collateral
-        uint sumCollateralB;      // Type B collateral
-        uint sumBorrowA;          // Type A borrow
-        uint sumBorrowB;          // Type B borrow
-        uint sumBorrowPlusEffectsA; // Type A borrow plus effects
-        uint sumBorrowPlusEffectsB; // Type B borrow plus effects
+        uint sumCollateralA;        // Type A collateral, secures Type B debt (line A)
+        uint sumCollateralB;        // Type B collateral, secures Type A debt (line B)
+        uint sumBorrowPlusEffectsA; // Type A debt + hypothetical effects charged to line B
+        uint sumBorrowPlusEffectsB; // Type B debt + hypothetical effects charged to line A
     }
 
     /**
@@ -802,10 +817,43 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
      *          account shortfall below collateral requirements)
      */
     function getAccountLiquidity(address account) public view returns (uint, uint, uint) {
+        if (separationModeEnabled) {
+            return _collapsedSeparatedLiquidity(account, BToken(address(0)), 0, 0, RiskMode.LIQUIDATION);
+        }
         // LIQUIDATION line: reports health "how far from being liquidatable".
         (Error err, uint liquidity, uint shortfall) = getHypotheticalAccountLiquidityInternal(account, BToken(address(0)), 0, 0, RiskMode.LIQUIDATION);
 
         return (uint(err), liquidity, shortfall);
+    }
+
+    /**
+     * @notice Answer the classic single-pool (liquidity, shortfall) question while separation
+     *         mode is on, without ever being optimistic.
+     * @dev The two lines are independent: A collateral secures B debt and vice versa. Netting
+     *      them as one pool -- which is what the single-line calculation does -- lets spare
+     *      headroom on one line hide a shortfall on the other, so an account the protocol will
+     *      happily liquidate reads as healthy to every Lens/UI/bot consumer. Collapse instead:
+     *      any shortfall surfaces, and the reported headroom is the tighter of the two lines.
+     *      Callers that need to act per line must use getAccountLiquiditySeparated.
+     */
+    function _collapsedSeparatedLiquidity(
+        address account,
+        BToken bTokenModify,
+        uint redeemTokens,
+        uint borrowAmount,
+        RiskMode mode
+    ) internal view returns (uint, uint, uint) {
+        (Error err, uint liquidityA, uint shortfallA, uint liquidityB, uint shortfallB) =
+            getHypotheticalAccountLiquidityInternalSeparated(account, bTokenModify, redeemTokens, borrowAmount, mode);
+        if (err != Error.NO_ERROR) {
+            return (uint(err), 0, 0);
+        }
+
+        uint shortfall = add_(shortfallA, shortfallB);
+        if (shortfall > 0) {
+            return (uint(Error.NO_ERROR), 0, shortfall);
+        }
+        return (uint(Error.NO_ERROR), liquidityA < liquidityB ? liquidityA : liquidityB, 0);
     }
 
     /**
@@ -834,6 +882,9 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
         address bTokenModify,
         uint redeemTokens,
         uint borrowAmount) public view returns (uint, uint, uint) {
+        if (separationModeEnabled) {
+            return _collapsedSeparatedLiquidity(account, BToken(bTokenModify), redeemTokens, borrowAmount, RiskMode.BORROW);
+        }
         // Simulates a borrow/redeem -> BORROW line (borrow factor).
         (Error err, uint liquidity, uint shortfall) = getHypotheticalAccountLiquidityInternal(account, BToken(bTokenModify), redeemTokens, borrowAmount, RiskMode.BORROW);
         return (uint(err), liquidity, shortfall);
@@ -871,6 +922,12 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
             if (oErr != 0) { // semi-opaque error code, we assume NO_ERROR == 0 is invariant between upgrades
                 return (Error.SNAPSHOT_ERROR, 0, 0);
             }
+            // An empty position contributes nothing whatever the price is, so skip the oracle
+            // read. bTokenModify must never be skipped: it is empty on a first borrow, and the
+            // hypothetical redeem/borrow is applied inside this same loop iteration.
+            if (vars.bTokenBalance == 0 && vars.borrowBalance == 0 && asset != bTokenModify) {
+                continue;
+            }
             vars.collateralFactor = Exp({mantissa: collateralLineMantissa(address(asset), mode)});
             vars.exchangeRate = Exp({mantissa: vars.exchangeRateMantissa});
 
@@ -891,7 +948,7 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
             vars.sumBorrowPlusEffects = mul_ScalarTruncateAddUInt(vars.oraclePrice, vars.borrowBalance, vars.sumBorrowPlusEffects);
 
             // Calculate effects of interacting with bTokenModify
-            if (asset == bTokenModify) {
+            if (address(asset) == address(bTokenModify)) {
                 // redeem effect
                 // sumBorrowPlusEffects += tokensToDenom * redeemTokens
                 vars.sumBorrowPlusEffects = mul_ScalarTruncateAddUInt(vars.tokensToDenom, redeemTokens, vars.sumBorrowPlusEffects);
@@ -924,6 +981,14 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
             return Error.SNAPSHOT_ERROR;
         }
 
+        // An empty position contributes zero to both lines whatever the price is, so skip
+        // the oracle read entirely. Besides the gas, this keeps a dead price feed on a market
+        // the account merely entered from bricking its whole liquidity calculation -- and with
+        // it every redeem, borrow and LIQUIDATION on unrelated positions.
+        if (bTokenBalance == 0 && borrowBalance == 0) {
+            return Error.NO_ERROR;
+        }
+
         uint oraclePriceMantissa = oracle.getUnderlyingPrice(asset);
         if (oraclePriceMantissa == 0) {
             return Error.PRICE_ERROR;
@@ -938,18 +1003,23 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
         );
         uint borrowValue = mul_ScalarTruncate(Exp({mantissa: oraclePriceMantissa}), borrowBalance);
 
-        // Accumulate by token type (only TYPE_A and TYPE_B participate in separation mode)
+        // Accumulate by token type.
         TokenType tokenType = tokenTypes[address(asset)];
         if (tokenType == TokenType.TYPE_A) {
             sepVars.sumCollateralA += collateralValue;
-            sepVars.sumBorrowA += borrowValue;
-            sepVars.sumBorrowPlusEffectsA = sepVars.sumBorrowA;
+            sepVars.sumBorrowPlusEffectsA += borrowValue;
         } else if (tokenType == TokenType.TYPE_B) {
             sepVars.sumCollateralB += collateralValue;
-            sepVars.sumBorrowB += borrowValue;
-            sepVars.sumBorrowPlusEffectsB = sepVars.sumBorrowB;
+            sepVars.sumBorrowPlusEffectsB += borrowValue;
+        } else {
+            // UNCLASSIFIED with a live position. _setSeparationMode refuses to turn the mode
+            // on while any listed market is unclassified, and _setTokenType refuses to move a
+            // non-empty market while it is on, so this is a backstop rather than a live path.
+            // Be conservative in both directions: the collateral secures nothing, but the debt
+            // must never go invisible, so charge it against both lines.
+            sepVars.sumBorrowPlusEffectsA += borrowValue;
+            sepVars.sumBorrowPlusEffectsB += borrowValue;
         }
-        // Non-classified tokens (default value 0) are ignored in separation mode
 
         return Error.NO_ERROR;
     }
@@ -978,18 +1048,32 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
         uint collateralFactorMantissa = collateralLineMantissa(address(bTokenModify), mode);
         TokenType tokenType = tokenTypes[address(bTokenModify)];
 
+        // A redeem removes COLLATERAL, a borrow adds DEBT, and in separation mode those two
+        // land on OPPOSITE risk lines:
+        //   line A: shortfallA = sumBorrowPlusEffectsB - sumCollateralA  (A collateral backs B debt)
+        //   line B: shortfallB = sumBorrowPlusEffectsA - sumCollateralB  (B collateral backs A debt)
+        // Withdrawing TYPE_A collateral shrinks sumCollateralA, i.e. it must be charged to
+        // line A -- which we express (Compound-style, avoiding an underflow clamp) by adding
+        // the withdrawn value to sumBorrowPlusEffectsB. Borrowing TYPE_A grows sumBorrowPlusEffectsA
+        // and stays on line B. Booking both into the same accumulator is what allowed a
+        // borrower to redeem the collateral backing their debt.
+        uint redeemValue = mul_ScalarTruncate(
+            mul_(mul_(Exp({mantissa: collateralFactorMantissa}), Exp({mantissa: exchangeRateMantissa})), Exp({mantissa: oraclePriceMantissa})),
+            redeemTokens
+        );
+        uint borrowValue = mul_ScalarTruncate(Exp({mantissa: oraclePriceMantissa}), borrowAmount);
+
         if (tokenType == TokenType.TYPE_A) {
-            sepVars.sumBorrowPlusEffectsA += mul_ScalarTruncate(
-                mul_(mul_(Exp({mantissa: collateralFactorMantissa}), Exp({mantissa: exchangeRateMantissa})), Exp({mantissa: oraclePriceMantissa})),
-                redeemTokens
-            );
-            sepVars.sumBorrowPlusEffectsA += mul_ScalarTruncate(Exp({mantissa: oraclePriceMantissa}), borrowAmount);
+            sepVars.sumBorrowPlusEffectsB += redeemValue; // less TYPE_A collateral -> line A
+            sepVars.sumBorrowPlusEffectsA += borrowValue; // more TYPE_A debt      -> line B
         } else if (tokenType == TokenType.TYPE_B) {
-            sepVars.sumBorrowPlusEffectsB += mul_ScalarTruncate(
-                mul_(mul_(Exp({mantissa: collateralFactorMantissa}), Exp({mantissa: exchangeRateMantissa})), Exp({mantissa: oraclePriceMantissa})),
-                redeemTokens
-            );
-            sepVars.sumBorrowPlusEffectsB += mul_ScalarTruncate(Exp({mantissa: oraclePriceMantissa}), borrowAmount);
+            sepVars.sumBorrowPlusEffectsA += redeemValue; // less TYPE_B collateral -> line B
+            sepVars.sumBorrowPlusEffectsB += borrowValue; // more TYPE_B debt       -> line A
+        } else {
+            // UNCLASSIFIED, mirroring _processSeparatedAsset: its collateral is counted on
+            // neither line so a redeem costs nothing, but hypothetical debt must stay visible.
+            sepVars.sumBorrowPlusEffectsA += borrowValue;
+            sepVars.sumBorrowPlusEffectsB += borrowValue;
         }
 
         return Error.NO_ERROR;
@@ -1541,6 +1625,27 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
         // Store old type for event
         TokenType oldType = tokenTypes[address(bToken)];
 
+        // A market's type decides which line its collateral and its debt sit on, so MOVING a
+        // live market between lines rewrites both of them underneath existing positions: an
+        // account can go from healthy to shortfall without a price moving or a token changing
+        // hands. Such a move needs an empty market -- deprecate it, let it wind down, retype.
+        //
+        // Classifying an UNCLASSIFIED market is exempt, and must be: a market listed while the
+        // mode is already on starts unclassified, and refusing to classify it once someone has
+        // supplied would strand it permanently. The move is monotonically safe anyway -- its
+        // collateral goes from counting on no line to counting on one, and its debt from being
+        // charged to both lines to just one -- so no account can be pushed into shortfall.
+        //
+        // Outside separation mode the type has no effect at all, so anything goes.
+        if (
+            separationModeEnabled &&
+            oldType != TokenType.UNCLASSIFIED &&
+            oldType != tokenType &&
+            (bToken.totalSupply() != 0 || bToken.totalBorrows() != 0)
+        ) {
+            return fail(Error.REJECTION, FailureInfo.SET_COLLATERAL_FACTOR_VALIDATION);
+        }
+
         // Set new type
         tokenTypes[address(bToken)] = tokenType;
 
@@ -1561,9 +1666,33 @@ contract Blotroller is BlotrollerStorage, BlotrollerInterface, BlotrollerErrorRe
             return fail(Error.UNAUTHORIZED, FailureInfo.SET_PAUSE_GUARDIAN_OWNER_CHECK);
         }
 
+        // Turning the mode ON is only safe once the classification it depends on actually
+        // exists. With every market on one line the opposite line has no collateral at all,
+        // which blocks every borrow, and -- since liquidation now requires opposite-type
+        // collateral -- every liquidation too. Turning it OFF needs no checks: the single-pool
+        // model is always a valid fallback.
+        if (enabled) {
+            uint countA = 0;
+            uint countB = 0;
+            for (uint i = 0; i < allMarkets.length; i++) {
+                TokenType t = tokenTypes[address(allMarkets[i])];
+                if (t == TokenType.TYPE_A) {
+                    countA++;
+                } else if (t == TokenType.TYPE_B) {
+                    countB++;
+                } else {
+                    // A listed but unclassified market would sit on neither line.
+                    return fail(Error.REJECTION, FailureInfo.SET_COLLATERAL_FACTOR_VALIDATION);
+                }
+            }
+            if (countA == 0 || countB == 0) {
+                return fail(Error.REJECTION, FailureInfo.SET_COLLATERAL_FACTOR_VALIDATION);
+            }
+        }
+
         // Store old mode for event
         bool oldMode = separationModeEnabled;
-        
+
         // Set new mode
         separationModeEnabled = enabled;
 
